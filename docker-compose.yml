@@ -1,0 +1,11 @@
+services:
+  jellyfin-music-bot:
+    build: .
+    image: jellyfin-discord-music-bot
+    container_name: jellyfin-music-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Uncomment if your Jellyfin server lives on another compose network:
+    # networks:
+    #   - jellyfin
