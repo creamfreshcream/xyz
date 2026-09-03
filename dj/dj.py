@@ -420,18 +420,19 @@ def telnet_command(host: str, port: int, command: str, timeout: float = 10.0) ->
 
 
 def queue_length(cfg: Config) -> int:
-    reply = telnet_command(cfg.liquidsoap_host, cfg.liquidsoap_port, f"{cfg.queue_id}.length")
-    try:
-        return int(reply.splitlines()[0].strip())
-    except (ValueError, IndexError) as exc:
-        raise LiquidsoapError(f"Unexpected reply to .length: {reply!r}") from exc
+    # `<id>.queue` is request.queue's actual telnet command (there is no
+    # `.length`) -- it replies with the queued-but-not-yet-playing request
+    # ids on one space-separated line, e.g. "2 3", or blank when empty.
+    reply = telnet_command(cfg.liquidsoap_host, cfg.liquidsoap_port, f"{cfg.queue_id}.queue")
+    return len(reply.split())
 
 
 def queue_push(cfg: Config, uri: str) -> None:
     # The URI itself never contains literal newlines (annotate_uri escapes
-    # them via _escape's whitespace collapsing), so a single-line command is safe.
-    reply = telnet_command(cfg.liquidsoap_host, cfg.liquidsoap_port, f'{cfg.queue_id}.push.uri {uri}')
-    if "error" in reply.lower() or "false" in reply.lower():
+    # them via _escape's whitespace collapsing), so a single-line command is
+    # safe. Reply is the new request's id (e.g. "1"), not an "OK" of any kind.
+    reply = telnet_command(cfg.liquidsoap_host, cfg.liquidsoap_port, f'{cfg.queue_id}.push {uri}')
+    if not reply.strip().isdigit():
         log.warning("Liquidsoap push may have failed: %s", reply)
 
 
