@@ -29,8 +29,11 @@ services:
       - ./jingles:/jingles:ro
       - playlists:/playlists:ro
     ports:
-      # Live DJ input (butt, Mixxx, …). Comment out if you never broadcast live.
-      - "${RADIO_HARBOR_PORT:-8005}:${RADIO_HARBOR_PORT:-8005}"
+      # Live DJ input (butt, Mixxx, …). Loopback-only by default — this host
+      # has no firewall in front of it, and the Icecast source protocol sends
+      # its password in the clear. Widen this (or tunnel in over SSH) only
+      # when you're actually about to broadcast live.
+      - "127.0.0.1:${RADIO_HARBOR_PORT:-8005}:${RADIO_HARBOR_PORT:-8005}"
     depends_on:
       icecast:
         condition: service_started
@@ -46,29 +49,32 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # Host port picked to avoid this box's existing services on 8000; the
+    # container itself still listens on 8000 internally.
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8010:8000"
 
   # TLS termination, the web player, and a proxy for the stream + status JSON.
-  caddy:
-    image: caddy:2-alpine
-    container_name: radio-caddy
-    restart: unless-stopped
-    env_file:
-      - .env
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./web:/srv/web:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - icecast
+  # Disabled here: this host already runs a system-level Caddy (for the other
+  # creamfresh.xyz subdomains) bound to 80/443. That instance proxies to
+  # icecast directly instead — see /etc/caddy/Caddyfile on the host.
+  # caddy:
+  #   image: caddy:2-alpine
+  #   container_name: radio-caddy
+  #   restart: unless-stopped
+  #   env_file:
+  #     - .env
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #     - "443:443/udp"
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - ./web:/srv/web:ro
+  #     - caddy_data:/data
+  #     - caddy_config:/config
+  #   depends_on:
+  #     - icecast
 
 volumes:
   playlists:
-  caddy_data:
-  caddy_config:
