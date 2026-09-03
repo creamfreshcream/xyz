@@ -14,6 +14,10 @@ services:
     volumes:
       - ./dj/schedule.json:/dj/schedule.json:ro
       - dj_state:/state
+    ports:
+      # Loopback-only status/override API -- the host's Caddy proxies /dj/*
+      # from here, same pattern as icecast's admin port below.
+      - "127.0.0.1:9091:${DJ_STATUS_PORT:-9090}"
     networks:
       - default
       - audiomuse_default
