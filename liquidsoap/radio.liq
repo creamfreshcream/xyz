@@ -11,7 +11,7 @@ settings.log.file.set(false)
 settings.log.level.set(3)
 
 # Telnet control socket for the `dj` service to push tracks and check queue
-# depth (`dj_queue.push.uri <uri>`, `dj_queue.length`). Bound to all interfaces
+# depth (`dj_queue.push <uri>`, `dj_queue.queue`). Bound to all interfaces
 # *inside this container* so the `dj` container can reach it by service name
 # over the compose network — but docker-compose.yml never publishes this
 # port to the host, so it's unreachable from outside the stack.
@@ -50,13 +50,65 @@ jingles_dir = env("RADIO_JINGLES_DIR", "")
 jingle_every = env_int("RADIO_JINGLE_EVERY", 0)
 crossfade_duration = env_float("RADIO_CROSSFADE", 3.0)
 
+# ------------------------------------------------------------- metadata cleanup
+
+# Some library tags carry literal HTML entities (e.g. "&#269;" instead of "č")
+# rather than the real character -- almost certainly baked in by whatever tool
+# tagged the file, not something introduced here. Icecast's own status-json.xsl
+# does its own separate entity-escaping on top of that for the web player,
+# handled client-side; this instead cleans the metadata itself before it goes
+# anywhere, so every consumer of the stream (ICY metadata included) sees the
+# real character.
+def utf8_char(code) =
+  if code < 0x80 then
+    string.char(code)
+  elsif code < 0x800 then
+    string.char(0xC0 + code / 64) ^ string.char(0x80 + code mod 64)
+  elsif code < 0x10000 then
+    string.char(0xE0 + code / 4096) ^
+    string.char(0x80 + (code / 64) mod 64) ^
+    string.char(0x80 + code mod 64)
+  else
+    string.char(0xF0 + code / 262144) ^
+    string.char(0x80 + (code / 4096) mod 64) ^
+    string.char(0x80 + (code / 64) mod 64) ^
+    string.char(0x80 + code mod 64)
+  end
+end
+
+def decode_entities(s) =
+  s = regexp(flags=["g"], "&#[0-9]+;").replace(fun (m) -> begin
+    let code = int_of_string(string.sub(m, start=2, length=string.length(m)-3), default=0)
+    if code > 0 then utf8_char(code) else m end
+  end, s)
+  s = regexp(flags=["g"], "&#x[0-9a-fA-F]+;").replace(fun (m) -> begin
+    let hex = string.sub(m, start=3, length=string.length(m)-4)
+    let code = int_of_string("0x" ^ hex, default=0)
+    if code > 0 then utf8_char(code) else m end
+  end, s)
+  s = string.replace(pattern="&amp;", fun (_) -> "&", s)
+  s = string.replace(pattern="&lt;", fun (_) -> "<", s)
+  s = string.replace(pattern="&gt;", fun (_) -> ">", s)
+  s = string.replace(pattern="&quot;", fun (_) -> "\"", s)
+  s = string.replace(pattern="&#39;|&apos;", fun (_) -> "'", s)
+  s
+end
+
+def decode_metadata(m) =
+  list.map(fun (kv) -> begin
+    let (k, v) = kv
+    (k, decode_entities(v))
+  end, m)
+end
+
 # ---------------------------------------------------------------- music source
 
 # The `dj` service is the only writer: it pushes one track at a time via
-# telnet (`dj_queue.push.uri <annotate-uri>`) and tops the queue up before
-# it runs dry, checking depth with `dj_queue.length`. `interactive` (telnet
+# telnet (`dj_queue.push <annotate-uri>`) and tops the queue up before it
+# runs dry, checking depth with `dj_queue.queue`. `interactive` (telnet
 # control) defaults to true, which is exactly what's needed here.
 music = request.queue(id="dj_queue")
+music = metadata.map(decode_metadata, music)
 
 # Optional station IDs / jingles: one jingle every RADIO_JINGLE_EVERY tracks.
 music =
