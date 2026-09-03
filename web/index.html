@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Radio</title>
+<meta name="description" content="Live internet radio">
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #14181d;
+    --line: #232a32;
+    --text: #e9edf2;
+    --muted: #8b97a6;
+    --accent: #f2624b;
+    --accent-soft: rgba(242, 98, 75, 0.14);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: radial-gradient(1200px 600px at 50% -10%, #1a2029 0%, var(--bg) 60%);
+    color: var(--text);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .card {
+    width: min(440px, 100%);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 28px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  }
+
+  .station {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 26px;
+  }
+
+  .station h1 {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .station p {
+    margin: 2px 0 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 11px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .badge.offline { background: rgba(139, 151, 166, 0.12); color: var(--muted); }
+
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  .badge:not(.offline) .dot { animation: pulse 2s ease-in-out infinite; }
+
+  @keyframes pulse { 50% { opacity: 0.25; } }
+
+  .now {
+    min-height: 74px;
+    margin-bottom: 24px;
+  }
+
+  .now .label {
+    font-size: 11px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .now .title {
+    margin-top: 8px;
+    font-size: 21px;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    overflow-wrap: anywhere;
+  }
+
+  .now .artist {
+    margin-top: 3px;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  button.play {
+    flex: none;
+    width: 58px;
+    height: 58px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    transition: transform 0.12s ease, filter 0.12s ease;
+  }
+
+  button.play:hover { filter: brightness(1.08); }
+  button.play:active { transform: scale(0.94); }
+  button.play:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+  button.play svg { width: 22px; height: 22px; fill: currentColor; }
+
+  .volume { flex: 1; display: flex; align-items: center; gap: 10px; color: var(--muted); }
+
+  input[type="range"] {
+    flex: 1;
+    accent-color: var(--accent);
+    background: transparent;
+  }
+
+  .meta {
+    margin-top: 22px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    justify-content: space-between;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+
+  .history { margin-top: 18px; }
+  .history .label { font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); }
+  .history ol { margin: 10px 0 0; padding: 0; list-style: none; font-size: 13px; color: var(--muted); }
+  .history li { padding: 4px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .history:empty, .history[hidden] { display: none; }
+
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="station">
+    <div>
+      <h1 id="station-name">Radio</h1>
+      <p id="station-description"></p>
+    </div>
+    <span class="badge offline" id="status"><span class="dot"></span><span id="status-text">Offline</span></span>
+  </div>
+
+  <div class="now">
+    <div class="label">Now playing</div>
+    <div class="title" id="title">—</div>
+    <div class="artist" id="artist"></div>
+  </div>
+
+  <div class="controls">
+    <button class="play" id="play" type="button" aria-label="Play">
+      <svg id="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+    </button>
+    <div class="volume">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+        <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z"/>
+      </svg>
+      <input type="range" id="volume" min="0" max="100" value="80" aria-label="Volume">
+    </div>
+  </div>
+
+  <div class="meta">
+    <span id="listeners">— listeners</span>
+    <span id="quality"></span>
+  </div>
+
+  <div class="history" id="history" hidden>
+    <div class="label">Recently played</div>
+    <ol id="history-list"></ol>
+  </div>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const STATUS_URL = "/status-json.xsl";
+  const FALLBACK_MOUNT = "/stream.mp3";
+  const POLL_MS = 10000;
+  const HISTORY_LENGTH = 5;
+
+  const audio = new Audio();
+  audio.preload = "none";
+  audio.crossOrigin = "anonymous";
+
+  const el = (id) => document.getElementById(id);
+  const history = [];
+  let mount = FALLBACK_MOUNT;
+  let lastTrack = "";
+
+  const savedVolume = Number(localStorage.getItem("radio:volume"));
+  const volume = Number.isFinite(savedVolume) && savedVolume > 0 ? savedVolume : 80;
+  el("volume").value = volume;
+  audio.volume = volume / 100;
+
+  el("volume").addEventListener("input", (event) => {
+    audio.volume = event.target.value / 100;
+    try { localStorage.setItem("radio:volume", event.target.value); } catch (_) {}
+  });
+
+  el("play").addEventListener("click", () => {
+    if (audio.paused) {
+      // Re-point at the mount every time: a live stream cannot be resumed, and a
+      // stale URL would replay whatever was buffered minutes ago.
+      audio.src = mount + (mount.includes("?") ? "&" : "?") + "t=" + Date.now();
+      audio.play().catch(() => setPlaying(false));
+      setPlaying(true);
+    } else {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+      setPlaying(false);
+    }
+  });
+
+  audio.addEventListener("playing", () => setPlaying(true));
+  audio.addEventListener("pause", () => setPlaying(false));
+  audio.addEventListener("error", () => setPlaying(false));
+
+  function setPlaying(playing) {
+    el("icon").innerHTML = playing
+      ? '<path d="M6 5h4v14H6zM14 5h4v14h-4z"/>'
+      : '<path d="M8 5v14l11-7z"/>';
+    el("play").setAttribute("aria-label", playing ? "Pause" : "Play");
+  }
+
+  function sources(stats) {
+    const source = stats && stats.source;
+    if (!source) return [];
+    return Array.isArray(source) ? source : [source];
+  }
+
+  function pickSource(list) {
+    // Prefer the mount we are already playing, otherwise take the first one and
+    // adopt it — that way renaming RADIO_MOUNT needs no change in here.
+    const match = list.find((s) => String(s.listenurl || "").endsWith(mount));
+    return match || list[0] || null;
+  }
+
+  function splitTitle(source) {
+    const artist = source.artist || "";
+    const title = source.title || source.yp_currently_playing || "";
+    if (artist) return { artist, title };
+    const parts = String(title).split(" - ");
+    return parts.length > 1
+      ? { artist: parts.shift().trim(), title: parts.join(" - ").trim() }
+      : { artist: "", title: String(title).trim() };
+  }
+
+  function remember(track) {
+    if (!track || track === lastTrack) return;
+    if (lastTrack) history.unshift(lastTrack);
+    lastTrack = track;
+    history.splice(HISTORY_LENGTH);
+    el("history").hidden = history.length === 0;
+    el("history-list").replaceChildren(
+      ...history.map((entry) => {
+        const li = document.createElement("li");
+        li.textContent = entry;
+        return li;
+      })
+    );
+  }
+
+  function setOffline() {
+    el("status").classList.add("offline");
+    el("status-text").textContent = "Offline";
+    el("title").textContent = "Off air";
+    el("artist").textContent = "";
+    el("listeners").textContent = "— listeners";
+    el("quality").textContent = "";
+  }
+
+  async function poll() {
+    try {
+      const response = await fetch(STATUS_URL, { cache: "no-store" });
+      const source = pickSource(sources((await response.json()).icestats));
+      if (!source) return setOffline();
+
+      if (source.listenurl) {
+        try { mount = new URL(source.listenurl).pathname; } catch (_) {}
+      }
+
+      const { artist, title } = splitTitle(source);
+      const name = source.server_name || "Radio";
+      document.title = title ? `${title} · ${name}` : name;
+      el("station-name").textContent = name;
+      el("station-description").textContent = source.server_description || "";
+      el("title").textContent = title || "—";
+      el("artist").textContent = artist;
+
+      const listeners = Number(source.listeners || 0);
+      el("listeners").textContent = `${listeners} listener${listeners === 1 ? "" : "s"}`;
+      el("quality").textContent = [
+        source.bitrate ? `${source.bitrate} kbps` : "",
+        source.genre || "",
+      ].filter(Boolean).join(" · ");
+
+      el("status").classList.remove("offline");
+      el("status-text").textContent = "On air";
+      remember([artist, title].filter(Boolean).join(" — "));
+    } catch (_) {
+      setOffline();
+    }
+  }
+
+  poll();
+  setInterval(poll, POLL_MS);
+})();
+</script>
+</body>
+</html>

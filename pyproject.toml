@@ -1,0 +1,10 @@
+[project]
+name = "jellyfin-internet-radio"
+version = "1.0.0"
+description = "Icecast + Liquidsoap internet radio fed by a Jellyfin library"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

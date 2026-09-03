@@ -1,0 +1,74 @@
+services:
+  # Rewrites /playlists/radio.m3u from the Jellyfin library every RADIO_REFRESH_INTERVAL.
+  playlist-sync:
+    build: ./playlist_sync
+    image: jellyfin-radio-playlist-sync
+    container_name: radio-playlist-sync
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - playlists:/playlists
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /playlists/radio.m3u"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # Turns that playlist (or a live DJ) into a continuous stream.
+  liquidsoap:
+    image: savonet/liquidsoap:v2.2.5
+    container_name: radio-liquidsoap
+    restart: unless-stopped
+    command: ["liquidsoap", "/etc/liquidsoap/radio.liq"]
+    env_file:
+      - .env
+    volumes:
+      - ./liquidsoap/radio.liq:/etc/liquidsoap/radio.liq:ro
+      - ./jingles:/jingles:ro
+      - playlists:/playlists:ro
+    ports:
+      # Live DJ input (butt, Mixxx, …). Comment out if you never broadcast live.
+      - "${RADIO_HARBOR_PORT:-8005}:${RADIO_HARBOR_PORT:-8005}"
+    depends_on:
+      icecast:
+        condition: service_started
+      playlist-sync:
+        condition: service_healthy
+
+  # The actual streaming server. Only Caddy and an SSH tunnel can reach it —
+  # the admin UI at http://127.0.0.1:8000/admin/ is deliberately not public.
+  icecast:
+    build: ./icecast
+    image: jellyfin-radio-icecast
+    container_name: radio-icecast
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  # TLS termination, the web player, and a proxy for the stream + status JSON.
+  caddy:
+    image: caddy:2-alpine
+    container_name: radio-caddy
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web:/srv/web:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - icecast
+
+volumes:
+  playlists:
+  caddy_data:
+  caddy_config:

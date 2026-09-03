@@ -1,0 +1,24 @@
+# Set RADIO_DOMAIN in .env:
+#   radio.example.com  -> automatic Let's Encrypt certificate
+#   :80                -> plain HTTP, handy for a local test run
+{$RADIO_DOMAIN:localhost} {
+	# The stream itself and Icecast's status JSON, proxied so listeners only ever
+	# talk to Caddy over HTTPS. flush_interval -1 disables response buffering —
+	# without it Caddy would hold the audio back in chunks. Deliberately not
+	# compressed: it is already MP3.
+	@icecast path /stream.mp3 /stream-hq.mp3 /status-json.xsl
+	handle @icecast {
+		header Access-Control-Allow-Origin "*"
+		reverse_proxy icecast:8000 {
+			flush_interval -1
+		}
+	}
+
+	# Everything else is the web player.
+	handle {
+		encode zstd gzip
+		root * /srv/web
+		file_server
+		header /index.html Cache-Control "no-cache"
+	}
+}
