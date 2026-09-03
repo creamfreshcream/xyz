@@ -272,14 +272,24 @@
     return match || list[0] || null;
   }
 
+  // Icecast's status-json.xsl HTML-entity-escapes metadata (a leftover from
+  // its XSLT origins) even though the endpoint is JSON — "–" arrives as
+  // "&#8211;". Decode via a detached textarea: the browser's own parser
+  // does the work, and textarea content is never executed as markup.
+  const entityDecoder = document.createElement("textarea");
+  function decodeEntities(text) {
+    entityDecoder.innerHTML = text;
+    return entityDecoder.value;
+  }
+
   function splitTitle(source) {
-    const artist = source.artist || "";
-    const title = source.title || source.yp_currently_playing || "";
+    const artist = decodeEntities(source.artist || "");
+    const title = decodeEntities(source.title || source.yp_currently_playing || "");
     if (artist) return { artist, title };
-    const parts = String(title).split(" - ");
+    const parts = title.split(" - ");
     return parts.length > 1
       ? { artist: parts.shift().trim(), title: parts.join(" - ").trim() }
-      : { artist: "", title: String(title).trim() };
+      : { artist: "", title: title.trim() };
   }
 
   function remember(track) {
@@ -317,10 +327,10 @@
       }
 
       const { artist, title } = splitTitle(source);
-      const name = source.server_name || "Radio";
+      const name = decodeEntities(source.server_name || "Radio");
       document.title = title ? `${title} · ${name}` : name;
       el("station-name").textContent = name;
-      el("station-description").textContent = source.server_description || "";
+      el("station-description").textContent = decodeEntities(source.server_description || "");
       el("title").textContent = title || "—";
       el("artist").textContent = artist;
 
