@@ -1,22 +1,26 @@
 services:
-  # Rewrites /playlists/radio.m3u from the Jellyfin library every RADIO_REFRESH_INTERVAL.
-  playlist-sync:
-    build: ./playlist_sync
-    image: jellyfin-radio-playlist-sync
-    container_name: radio-playlist-sync
+  # Decides what plays next (daypart mood + AudioMuse-AI sonic bridging) and
+  # pushes tracks one at a time onto Liquidsoap's request.queue over telnet.
+  # Needs AudioMuse-AI's Postgres for mood data, hence the second network.
+  dj:
+    build: ./dj
+    image: jellyfin-radio-dj
+    container_name: radio-dj
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      LIQUIDSOAP_HOST: liquidsoap
     volumes:
-      - playlists:/playlists
-    healthcheck:
-      test: ["CMD-SHELL", "test -s /playlists/radio.m3u"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 10s
+      - ./dj/schedule.json:/dj/schedule.json:ro
+      - dj_state:/state
+    networks:
+      - default
+      - audiomuse_default
+    depends_on:
+      - liquidsoap
 
-  # Turns that playlist (or a live DJ) into a continuous stream.
+  # Turns the DJ's queue (or a live DJ over harbor) into a continuous stream.
   liquidsoap:
     image: savonet/liquidsoap:v2.2.5
     container_name: radio-liquidsoap
@@ -27,18 +31,17 @@ services:
     volumes:
       - ./liquidsoap/radio.liq:/etc/liquidsoap/radio.liq:ro
       - ./jingles:/jingles:ro
-      - playlists:/playlists:ro
     ports:
       # Live DJ input (butt, Mixxx, …). Loopback-only by default — this host
       # has no firewall in front of it, and the Icecast source protocol sends
       # its password in the clear. Widen this (or tunnel in over SSH) only
       # when you're actually about to broadcast live.
       - "127.0.0.1:${RADIO_HARBOR_PORT:-8005}:${RADIO_HARBOR_PORT:-8005}"
+      # NOT the telnet control port (1234) — that stays internal to the
+      # compose network, reachable only by the dj service, never the host.
     depends_on:
       icecast:
         condition: service_started
-      playlist-sync:
-        condition: service_healthy
 
   # The actual streaming server. Only Caddy and an SSH tunnel can reach it —
   # the admin UI at http://127.0.0.1:8000/admin/ is deliberately not public.
@@ -77,4 +80,14 @@ services:
   #     - icecast
 
 volumes:
-  playlists:
+  dj_state:
+
+networks:
+  default:
+  # AudioMuse-AI's own compose project network — already running on this
+  # host (docker network ls shows it as "audiomuse_default"), and where its
+  # Postgres container is reachable by the DNS name "postgres". Not created
+  # here on purpose: docker compose fails fast if it's missing rather than
+  # silently standing up an empty, wrong network of the same name.
+  audiomuse_default:
+    external: true

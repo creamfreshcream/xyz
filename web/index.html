@@ -157,6 +157,16 @@
     color: var(--muted);
   }
 
+  .drift {
+    margin-top: 10px;
+    font-size: 12.5px;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+
+  .drift[hidden] { display: none; }
+  .drift b { color: var(--text); font-weight: 500; }
+
   .history { margin-top: 18px; }
   .history .label { font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); }
   .history ol { margin: 10px 0 0; padding: 0; list-style: none; font-size: 13px; color: var(--muted); }
@@ -180,6 +190,7 @@
     <div class="label">Now playing</div>
     <div class="title" id="title">—</div>
     <div class="artist" id="artist"></div>
+    <div class="drift" id="drift" hidden></div>
   </div>
 
   <div class="controls">
@@ -210,8 +221,10 @@
   "use strict";
 
   const STATUS_URL = "/status-json.xsl";
+  const DJ_STATUS_URL = "/dj/status";
   const FALLBACK_MOUNT = "/stream.mp3";
   const POLL_MS = 10000;
+  const DJ_POLL_MS = 30000; // the target changes over minutes, not seconds
   const HISTORY_LENGTH = 5;
 
   const audio = new Audio();
@@ -314,6 +327,7 @@
     el("artist").textContent = "";
     el("listeners").textContent = "— listeners";
     el("quality").textContent = "";
+    el("drift").hidden = true;
   }
 
   async function poll() {
@@ -349,8 +363,38 @@
     }
   }
 
+  // The DJ isn't guaranteed to be deployed (or reachable, mid-transition) —
+  // failures here just leave the line hidden rather than affecting playback.
+  async function pollDj() {
+    try {
+      const response = await fetch(DJ_STATUS_URL, { cache: "no-store" });
+      if (!response.ok) return;
+      const status = await response.json();
+      const target = status && status.target;
+      const dj = el("drift");
+      if (!target || !target.title) {
+        dj.hidden = true;
+        return;
+      }
+      const who = [target.author, target.title].filter(Boolean).join(" – ");
+      const phase = status.phase === "dwelling" ? "settling into" : "drifting toward";
+      const b = document.createElement("b");
+      b.textContent = who;
+      dj.replaceChildren(
+        `${phase} `,
+        b,
+        status.daypart ? ` · ${status.daypart}` : ""
+      );
+      dj.hidden = false;
+    } catch (_) {
+      el("drift").hidden = true;
+    }
+  }
+
   poll();
+  pollDj();
   setInterval(poll, POLL_MS);
+  setInterval(pollDj, DJ_POLL_MS);
 })();
 </script>
 </body>

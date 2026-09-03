@@ -8,8 +8,11 @@ Built to run on a single Hetzner box with `docker compose up -d`.
 
 ## What's in the box
 
-- **24/7 rotation** from your Jellyfin library — the whole thing, or filtered down to a
-  genre, a year range, your favourites, or one named Jellyfin playlist.
+- **An autonomous DJ**, not a shuffled playlist — `dj/` picks a mood target for the
+  time of day, sonically bridges to it from whatever's already queued (via AudioMuse-AI's
+  path-finding over your library's audio embeddings), then dwells nearby for a while before
+  picking the next target. Never a hard playlist swap; new arrivals in Jellyfin become
+  eligible candidates automatically, no re-sync step.
 - **Correct metadata** — title/artist/album travel from Jellyfin into the Icecast stream,
   so players and the web page show the right track.
 - **Live DJ input** — connect butt, Mixxx, or anything else that speaks the Icecast source
@@ -24,22 +27,29 @@ Built to run on a single Hetzner box with `docker compose up -d`.
 ## How it works
 
 ```
-Jellyfin ──HTTP──►  playlist-sync  ──►  /playlists/radio.m3u
-                                              │  (annotate: title/artist/album)
-butt / Mixxx ──►  harbor :8005  ──┐           ▼
-                                  └──►  Liquidsoap  ──MP3──►  Icecast  ──►  Caddy ──► 🎧
-                                       (live wins)                          (TLS + player)
+AudioMuse-AI Postgres ──mood data──┐
+Jellyfin ──HTTP──────────┐         ▼
+                          └──►  dj  ──telnet push──►  request.queue ──┐
+butt / Mixxx ──►  harbor :8005  ────────────────────────┐             ├─►  Liquidsoap  ──MP3──►  Icecast  ──►  Caddy ──► 🎧
+                                                         └─────────────┘   (live wins)              (TLS + player)
 ```
 
-- `playlist_sync/jellyfin_playlist.py` asks Jellyfin for tracks and writes them as
-  `annotate:` URIs into a playlist file, every `RADIO_REFRESH_INTERVAL` seconds. Standard
-  library only — no dependencies to keep up to date.
-- `liquidsoap/radio.liq` plays that playlist in random order, crossfades between tracks,
-  gives a connected live DJ priority, and pushes MP3 to Icecast. `mksafe` keeps the mount
-  alive with silence rather than dropping every listener if a source ever fails.
+- `dj/dj.py` decides what plays, one track at a time: it picks a mood target for the
+  current daypart (`dj/schedule.json`) by comparing candidate tracks' mood vectors —
+  read straight out of the `audiomuse-postgres` database AudioMuse-AI's own Jellyfin
+  plugin maintains — against that daypart's targets; bridges to it from the last queued
+  track using the plugin's `find_path` sonic-pathfinding endpoint; lingers near the target
+  for a while via `similar_tracks`; and pushes the resulting `annotate:` URIs onto
+  Liquidsoap's `request.queue` over its telnet control socket, topping the queue up before
+  it runs dry. It also serves a small status/override HTTP API (see below).
+- `liquidsoap/radio.liq` reads from that queue (nothing to reload, no file on disk),
+  smart-crossfades between tracks — Liquidsoap measures the loudness at each track
+  boundary and picks the transition accordingly, rather than a fixed blind fade — gives a
+  connected live DJ priority, and pushes MP3 to Icecast. `mksafe` keeps the mount alive
+  with silence rather than dropping every listener if a source ever fails.
 - `icecast/` is Debian's Icecast with the config rendered from environment variables.
 - `Caddyfile` terminates TLS, serves `web/index.html`, and proxies the stream plus
-  `/status-json.xsl` (the player reads now-playing from it).
+  `/status-json.xsl` (the player reads now-playing from it) and `/dj/status`.
 
 Liquidsoap reads the original file straight from Jellyfin (`static=true`), so Jellyfin does
 no transcoding work — one decode happens in Liquidsoap, then a single MP3 encode serves
@@ -75,14 +85,17 @@ machine under compose, attach the stack to its network:
 ```yaml
 # docker-compose.override.yml
 services:
-  playlist-sync:
-    networks: [jellyfin]
-  liquidsoap:
+  dj:
     networks: [jellyfin]
 networks:
   jellyfin:
     external: true
 ```
+
+The `dj` service also needs to reach AudioMuse-AI's Postgres database for mood data —
+`docker-compose.yml` already attaches it to `audiomuse_default` (AudioMuse-AI's own compose
+network) as an external network; adjust that name if your AudioMuse-AI stack's project name
+differs (`docker network ls` shows the real one).
 
 ### 3. Configure and start
 
@@ -105,12 +118,14 @@ Everything lives in `.env`.
 | `JELLYFIN_URL` | — | **Required.** e.g. `http://jellyfin:8096` |
 | `JELLYFIN_API_KEY` | — | **Required.** Dashboard → API Keys |
 | `JELLYFIN_USER_ID` | — | Needed for favourites and named playlists |
-| `RADIO_LIMIT` | `2000` | Tracks in the rotation |
-| `RADIO_REFRESH_INTERVAL` | `3600` | Seconds between playlist rebuilds |
-| `RADIO_GENRES` | — | Comma-separated, e.g. `Jazz, Soul` |
-| `RADIO_YEARS` | — | Comma-separated years, e.g. `1978,1979` |
-| `RADIO_FAVORITES_ONLY` | `false` | Only your favourites |
-| `RADIO_JELLYFIN_PLAYLIST` | — | Name of a Jellyfin playlist; overrides the filters |
+| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_DB` | `postgres` / `5432` / `audiomuse` / `audiomusedb` | AudioMuse-AI's own database, read-only |
+| `POSTGRES_PASSWORD` | — | **Required.** Same one AudioMuse-AI's containers use |
+| `DJ_LOOKAHEAD_TRACKS` | `6` | Tracks kept queued ahead in Liquidsoap |
+| `DJ_LOOP_INTERVAL` | `60` | Seconds between queue top-up checks |
+| `DJ_BRIDGE_MAX_TRACKS` | `14` | Cap on tracks spent bridging to a new target |
+| `DJ_DWELL_TRACKS` | `6` | Tracks spent lingering near a target |
+| `DJ_RECENT_TRACK_HOURS` / `DJ_RECENT_ARTIST_MINUTES` | `3` / `45` | Repeat-avoidance windows |
+| `DJ_STATUS_PORT` | `9090` | The `dj` service's own status/override API |
 | `RADIO_STREAM_MODE` | `direct` | `transcode` makes Jellyfin transcode first |
 | `RADIO_MAX_BITRATE` | `320000` | Only used when transcoding |
 | `RADIO_NAME` / `RADIO_DESCRIPTION` / `RADIO_GENRE` / `RADIO_URL` | — | Shown in players and directories |
@@ -128,7 +143,7 @@ Everything lives in `.env`.
 | `ICECAST_MAX_LISTENERS` | `200` | Hard cap on concurrent listeners |
 | `ICECAST_HOSTNAME` / `ICECAST_LOCATION` / `ICECAST_ADMIN_EMAIL` | — | Cosmetic, shown in status pages |
 | `RADIO_DOMAIN` | `localhost` | Your domain, or `:80` to test without TLS |
-| `LOG_LEVEL` | `INFO` | `DEBUG` for the playlist sync |
+| `LOG_LEVEL` | `INFO` | `DEBUG` for the `dj` service's logs |
 
 ## Going live
 
@@ -146,13 +161,33 @@ Point your broadcasting software at the harbor input:
 Connect and the playlist fades out within `RADIO_HARBOR_FADE` seconds; disconnect and it
 fades back in. Listeners never lose the connection because the mount itself never drops.
 
+## The DJ
+
+`dj/schedule.json` holds the daypart guardrails — edit it and restart the `dj` service to
+pick up changes, no rebuild needed:
+
+```bash
+$EDITOR dj/schedule.json
+docker compose restart dj
+```
+
+Check what it's doing, or push a target immediately (bridges to it from whatever's
+currently queued, same as an automatic transition):
+
+```bash
+curl -u creamfresh:<password> https://<your-domain>/dj/status
+curl -u creamfresh:<password> -X POST https://<your-domain>/dj/target \
+  -d '{"query": "ultradespair"}'
+# or by Jellyfin item ID: -d '{"item_id": "8e0567b799acbea96fb855c90a81cea8"}'
+```
+
 ## Operating it
 
 ```bash
-docker compose logs -f liquidsoap     # what is playing, and reconnects
-docker compose logs -f playlist-sync  # "Wrote 2000 tracks to /playlists/radio.m3u"
-docker compose restart liquidsoap     # picks up .liq or .env changes
-docker compose exec playlist-sync python jellyfin_playlist.py --once   # rebuild now
+docker compose logs -f liquidsoap  # what is playing, and reconnects
+docker compose logs -f dj          # target picks, bridges, and queue top-ups
+docker compose restart liquidsoap  # picks up .liq or .env changes
+docker compose restart dj          # picks up schedule.json or .env changes
 ```
 
 The Icecast admin UI is deliberately not exposed. Reach it through an SSH tunnel:
@@ -174,12 +209,14 @@ listeners run at roughly 2.8 GB/h. Hetzner's included traffic is generous, but
 - **Player says "Off air"** — `docker compose logs liquidsoap`. If it never connected,
   `ICECAST_SOURCE_PASSWORD` differs between the two containers (they share `.env`, so
   check you edited only one place).
-- **`playlist-sync` unhealthy, Liquidsoap never starts** — the playlist file is empty:
-  wrong `JELLYFIN_URL`, a key without access, or filters that match nothing. The log line
-  is `Jellyfin returned no tracks`.
-- **Silence on the mount** — Liquidsoap is playing `mksafe`'s blank source because every
-  request failed. Usually Jellyfin is unreachable *from the container*; test with
-  `docker compose exec liquidsoap curl -sI "<a URL from radio.m3u>"`.
+- **`dj` never pushes anything** — check `docker compose logs dj` first; it retries
+  forever, but a wrong `LIQUIDSOAP_HOST`/telnet port, an unreachable Postgres
+  (`POSTGRES_PASSWORD` mismatch, or `dj` not on AudioMuse-AI's network), or zero candidate
+  tracks (AudioMuse-AI hasn't analysed anything from this Jellyfin server yet) will all
+  show up there as repeated warnings.
+- **Silence on the mount** — Liquidsoap is playing `mksafe`'s blank source because the
+  queue ran dry. Check `docker compose logs dj` for push failures, and confirm Jellyfin is
+  reachable *from the `liquidsoap` container*, not just from `dj`.
 - **No certificate** — Caddy needs port 80 reachable from the internet for the ACME
   challenge, and `RADIO_DOMAIN` must resolve to this box.
 - **Live input refused** — most clients want the mount without a leading slash (`live`)
@@ -195,8 +232,9 @@ pip install pytest
 pytest
 ```
 
-The tests cover the playlist builder — Jellyfin query construction, the `annotate:`
-escaping, and the atomic playlist write — against a fake Jellyfin, so no server is needed.
+The tests cover `dj`'s pure logic — mood-vector distance, daypart resolution, path
+subsampling, the `annotate:` escaping, and state persistence — against fakes, so no
+Jellyfin, Postgres, or Liquidsoap instance is needed.
 
 Check the Liquidsoap script without starting the stack:
 

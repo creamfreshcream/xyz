@@ -1,0 +1,203 @@
+from datetime import datetime
+
+import pytest
+
+from dj.dj import (
+    Catalogue,
+    Config,
+    DjState,
+    _escape,
+    annotate_uri,
+    build_bridge,
+    build_dwell,
+    current_daypart,
+    mood_distance,
+    parse_feature_string,
+)
+
+SCHEDULE = [
+    {"name": "morning", "hours": [6, 10], "mood": {"relaxed": 0.7}},
+    {"name": "midday", "hours": [10, 14], "mood": {"danceable": 0.5}},
+    {"name": "night", "hours": [23, 6], "mood": {"relaxed": 0.7, "sad": 0.4}},
+]
+
+
+def config(**overrides):
+    env = {
+        "JELLYFIN_URL": "http://jellyfin:8096/",
+        "JELLYFIN_API_KEY": "secret",
+        "POSTGRES_PASSWORD": "hunter2",
+        **overrides,
+    }
+    import os
+
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    try:
+        return Config.from_env()
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_missing_credentials_are_reported(monkeypatch):
+    monkeypatch.delenv("JELLYFIN_URL", raising=False)
+    monkeypatch.delenv("JELLYFIN_API_KEY", raising=False)
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    from dj.dj import ConfigError
+
+    with pytest.raises(ConfigError):
+        Config.from_env()
+
+
+def test_parse_feature_string_reads_label_value_pairs():
+    assert parse_feature_string("happy:0.5,sad:0.1,party:0.9") == {
+        "happy": 0.5,
+        "sad": 0.1,
+        "party": 0.9,
+    }
+
+
+def test_parse_feature_string_ignores_junk():
+    assert parse_feature_string("") == {}
+    assert parse_feature_string(None) == {}
+    assert parse_feature_string("garbage,also:not-a-number") == {}
+
+
+def test_mood_distance_only_considers_target_dimensions():
+    mood = {"happy": 1.0, "sad": 1.0}
+    # "sad" isn't in the target, so it must not affect the distance.
+    assert mood_distance(mood, {"happy": 1.0}) == 0.0
+    assert mood_distance(mood, {"happy": 0.0}) == 1.0
+
+
+def test_mood_distance_treats_missing_track_dimensions_as_zero():
+    assert mood_distance({}, {"party": 1.0}) == 1.0
+
+
+def test_current_daypart_picks_the_matching_window():
+    assert current_daypart(SCHEDULE, datetime(2024, 1, 1, 7))["name"] == "morning"
+    assert current_daypart(SCHEDULE, datetime(2024, 1, 1, 11))["name"] == "midday"
+
+
+def test_current_daypart_handles_windows_wrapping_past_midnight():
+    assert current_daypart(SCHEDULE, datetime(2024, 1, 1, 23, 30))["name"] == "night"
+    assert current_daypart(SCHEDULE, datetime(2024, 1, 1, 2))["name"] == "night"
+
+
+def test_current_daypart_falls_back_to_the_first_entry_on_a_gap():
+    # 14-23 isn't covered by SCHEDULE above.
+    assert current_daypart(SCHEDULE, datetime(2024, 1, 1, 16))["name"] == "morning"
+
+
+def test_escape_collapses_whitespace_and_escapes_quotes():
+    assert _escape('He said "hi"\nloudly') == 'He said \\"hi\\" loudly'
+
+
+class FakeJellyfin:
+    def __init__(self, base_url="http://jellyfin:8096", api_key="secret", stream_mode="direct"):
+        self.cfg = type("C", (), {"stream_mode": stream_mode, "jellyfin_url": base_url, "api_key": api_key, "max_bitrate": 320000, "transcode_codec": "mp3"})()
+
+    def stream_url(self, item_id):
+        return f"http://jellyfin:8096/Audio/{item_id}/stream?static=true&api_key=secret"
+
+
+def test_annotate_uri_carries_metadata_from_a_jellyfin_item():
+    uri = annotate_uri({"Id": "1", "Name": "Blue Monday", "Artists": ["New Order"], "Album": "Power, Corruption & Lies"}, FakeJellyfin())
+    assert uri.startswith('annotate:title="Blue Monday",artist="New Order",album="Power, Corruption & Lies":http://jellyfin:8096/Audio/1/stream')
+
+
+def test_annotate_uri_carries_metadata_from_an_audiomuse_track():
+    uri = annotate_uri({"item_id": "1", "title": "X", "author": "Y", "album": "Z"}, FakeJellyfin())
+    assert uri.startswith('annotate:title="X",artist="Y",album="Z":')
+
+
+def test_annotate_uri_skips_items_without_an_id():
+    assert annotate_uri({"Name": "orphan"}, FakeJellyfin()) is None
+
+
+class FakePathJellyfin:
+    def __init__(self, path):
+        self._path = path
+
+    def find_path(self, start_id, end_id, max_steps=300):
+        return self._path
+
+
+def test_build_bridge_drops_the_starting_track():
+    path = [{"item_id": "from"}, {"item_id": "a"}, {"item_id": "to"}]
+    jf = FakePathJellyfin(path)
+    bridge = build_bridge(jf, "from", "to", max_tracks=10)
+    assert [t["item_id"] for t in bridge] == ["a", "to"]
+
+
+def test_build_bridge_returns_nothing_without_a_known_starting_point():
+    jf = FakePathJellyfin([])
+    assert build_bridge(jf, None, "to", max_tracks=10) == []
+
+
+def test_build_bridge_subsamples_long_paths_but_keeps_the_target():
+    path = [{"item_id": f"t{i}"} for i in range(50)]
+    path[0] = {"item_id": "from"}
+    path[-1] = {"item_id": "to"}
+    jf = FakePathJellyfin(path)
+    bridge = build_bridge(jf, "from", "to", max_tracks=10)
+    assert len(bridge) <= 11
+    assert bridge[-1]["item_id"] == "to"
+
+
+class FakeSimilarJellyfin:
+    def __init__(self, similar):
+        self._similar = similar
+
+    def similar_tracks(self, item_id, n=10):
+        return self._similar
+
+
+def test_build_dwell_excludes_already_played_tracks():
+    similar = [{"item_id": "a"}, {"item_id": "b"}, {"item_id": "c"}]
+    jf = FakeSimilarJellyfin(similar)
+    dwell = build_dwell(jf, "target", n=2, exclude_ids={"a"})
+    assert [t["item_id"] for t in dwell] == ["b", "c"]
+
+
+def test_dj_state_round_trips_through_a_file(tmp_path):
+    path = tmp_path / "state.json"
+    state = DjState()
+    state.record_played({"item_id": "1", "title": "A", "author": "Artist"})
+    state.save(str(path))
+
+    reloaded = DjState.load(str(path))
+    assert reloaded.last_item_id == "1"
+    assert reloaded.history[0]["title"] == "A"
+
+
+def test_dj_state_recent_track_ids_respects_the_window(monkeypatch):
+    state = DjState()
+    state.history = [
+        {"item_id": "old", "artist": "X", "at": "2000-01-01T00:00:00+00:00"},
+    ]
+    assert state.recent_track_ids(hours=3) == set()
+
+
+def test_catalogue_pick_target_prefers_closest_mood_matches():
+    # "low" exploration narrows the random pick to the 5 closest candidates
+    # (see Catalogue.pick_target) -- with 10 tracks spread evenly by distance,
+    # the far half must never be picked.
+    cat = Catalogue(config())
+    cat._tracks = [{"item_id": f"t{i}", "mood": {"happy": i / 10}} for i in range(10)]
+    close_half = {f"t{i}" for i in range(5, 10)}
+    for _ in range(20):
+        picked = cat.pick_target({"happy": 1.0}, exclude_ids=set(), exploration="low")
+        assert picked["item_id"] in close_half
+
+
+def test_catalogue_pick_target_excludes_recent_tracks():
+    cat = Catalogue(config())
+    cat._tracks = [{"item_id": "only", "mood": {"happy": 1.0}}]
+    picked = cat.pick_target({"happy": 1.0}, exclude_ids={"only"}, exploration="low")
+    # Nothing left to exclude to, so it falls back to the full pool rather than None.
+    assert picked["item_id"] == "only"

@@ -1,12 +1,23 @@
-# Internet radio: Jellyfin library on rotation, live DJ takes priority, out to Icecast.
+# Internet radio: a `dj` service decides tracks one at a time and pushes them
+# onto this queue over the telnet control socket — there's no playlist file
+# to reload, so there's nothing to jump or restart when the target changes.
 #
-#   playlist-sync ──► /playlists/radio.m3u ──┐
-#                                            ├─► fallback ─► crossfade ─► Icecast
-#   butt / Mixxx ──► input.harbor (:8005) ───┘   (live wins)
+#   dj (telnet push) ──► request.queue ──┐
+#                                        ├─► fallback ─► crossfade ─► Icecast
+#   butt / Mixxx ──► input.harbor (:8005) ┘   (live wins)
 
 settings.log.stdout.set(true)
 settings.log.file.set(false)
 settings.log.level.set(3)
+
+# Telnet control socket for the `dj` service to push tracks and check queue
+# depth (`dj_queue.push.uri <uri>`, `dj_queue.length`). Bound to all interfaces
+# *inside this container* so the `dj` container can reach it by service name
+# over the compose network — but docker-compose.yml never publishes this
+# port to the host, so it's unreachable from outside the stack.
+settings.server.telnet.set(true)
+settings.server.telnet.bind_addr.set("0.0.0.0")
+settings.server.telnet.port.set(1234)
 
 def env(name, default) =
   value = environment.get(name)
@@ -35,20 +46,17 @@ icecast_host = env("ICECAST_HOST", "icecast")
 icecast_port = env_int("ICECAST_PORT", 8000)
 icecast_password = env("ICECAST_SOURCE_PASSWORD", "hackme")
 
-playlist_file = env("RADIO_PLAYLIST_FILE", "/playlists/radio.m3u")
 jingles_dir = env("RADIO_JINGLES_DIR", "")
 jingle_every = env_int("RADIO_JINGLE_EVERY", 0)
 crossfade_duration = env_float("RADIO_CROSSFADE", 3.0)
 
 # ---------------------------------------------------------------- music source
 
-music =
-  playlist(
-    id="library",
-    mode="randomize",
-    reload_mode="watch",
-    playlist_file
-  )
+# The `dj` service is the only writer: it pushes one track at a time via
+# telnet (`dj_queue.push.uri <annotate-uri>`) and tops the queue up before
+# it runs dry, checking depth with `dj_queue.length`. `interactive` (telnet
+# control) defaults to true, which is exactly what's needed here.
+music = request.queue(id="dj_queue")
 
 # Optional station IDs / jingles: one jingle every RADIO_JINGLE_EVERY tracks.
 music =
@@ -59,7 +67,25 @@ music =
     music
   end
 
-music = if crossfade_duration > 0. then crossfade(duration=crossfade_duration, music) else music end
+# `smart=true` is Liquidsoap's loudness-aware crossfade: it measures the dB
+# level at the tail of the outgoing track and the head of the incoming one
+# and picks the transition accordingly (full crossfade when both are close in
+# level, a plain fade when one is much quieter/louder, avoiding either an
+# audible level jump or two loud tracks smearing into mush). `duration` is
+# the buffered analysis window and must be a bit larger than the fades
+# themselves so there's enough lookahead data to make that call.
+music =
+  if crossfade_duration > 0. then
+    crossfade(
+      smart=true,
+      fade_in=crossfade_duration,
+      fade_out=crossfade_duration,
+      duration=crossfade_duration + 2.,
+      music
+    )
+  else
+    music
+  end
 
 music = if env_bool("RADIO_NORMALIZE", false) then normalize(music) else music end
 

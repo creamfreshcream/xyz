@@ -1,0 +1,31 @@
+{
+  "_comment": "Loose daypart guardrails, in server-local time. `hours` is a [start, end) range in 24h clock; a window that wraps past midnight (like night) is written as start > end and handled that way in code. `mood` weights are matched against the same six-dimension mood vector AudioMuse-AI stores per track (happy/sad/aggressive/party/relaxed/danceable) - values are just relative targets, not required to sum to 1. `exploration` (low/medium/high, default medium) loosens how far from the target the adaptive picker is willing to wander -- higher means more variety, lower means it sticks closer to the mood target.",
+  "dayparts": [
+    {
+      "name": "morning",
+      "hours": [6, 10],
+      "mood": {"relaxed": 0.7, "happy": 0.5, "aggressive": 0.15, "danceable": 0.25}
+    },
+    {
+      "name": "midday",
+      "hours": [10, 14],
+      "mood": {"danceable": 0.5, "party": 0.4, "happy": 0.55, "relaxed": 0.35}
+    },
+    {
+      "name": "afternoon",
+      "hours": [14, 18],
+      "mood": {"party": 0.55, "aggressive": 0.45, "danceable": 0.6, "happy": 0.4}
+    },
+    {
+      "name": "evening",
+      "hours": [18, 23],
+      "mood": {"party": 0.6, "danceable": 0.5, "happy": 0.45},
+      "exploration": "high"
+    },
+    {
+      "name": "night",
+      "hours": [23, 6],
+      "mood": {"relaxed": 0.7, "sad": 0.4, "aggressive": 0.1, "party": 0.15}
+    }
+  ]
+}
