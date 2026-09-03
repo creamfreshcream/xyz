@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Hub · {{ app_name }}{% endblock %}
+{% block body %}
+{% include "_nav.html" %}
+<main class="wrap">
+  <div class="page-head">
+    <div>
+      <h1>Stations</h1>
+      <p class="muted">Every stream is private. Use a tuner URL to listen outside the browser.</p>
+    </div>
+    <div class="head-actions">
+      <span class="pill" id="health">checking…</span>
+      {% if user.role == 'admin' %}<a class="btn primary" href="/admin">New station</a>{% endif %}
+    </div>
+  </div>
+  <section id="stations" class="grid"><p class="muted">Loading…</p></section>
+</main>
+{% include "_player.html" %}
+{% endblock %}
+{% block scripts %}<script>initHub();</script>{% endblock %}

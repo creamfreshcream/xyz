@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Stations · {{ app_name }}{% endblock %}
+{% block body %}
+{% include "_nav.html" %}
+<main class="wrap">
+  <div class="page-head">
+    <div>
+      <h1>New station</h1>
+      <p class="muted">Pick what it plays and how it mixes. Everything else has a sane default.</p>
+    </div>
+  </div>
+
+  <section class="card form-card">
+    <form id="quick-form">
+      <div class="field-row">
+        <label>Built from
+          <select name="kind" id="kind">
+            <option value="genre">Genre</option>
+            <option value="mood">Mood (AudioMuse)</option>
+            <option value="artist">Artist</option>
+            <option value="similar">Sounds like (seed tracks)</option>
+            <option value="library">Whole library</option>
+          </select>
+        </label>
+        <label>Mixing style
+          <select name="template" id="template"></select>
+        </label>
+      </div>
+
+      <label>Station name
+        <input name="name" id="name" placeholder="Deep House Nights" required>
+      </label>
+
+      <label id="values-label">Genres
+        <input name="values" id="values" placeholder="Deep House, House, Nu Disco" list="value-hints">
+        <datalist id="value-hints"></datalist>
+        <small class="muted" id="values-hint">Comma separated.</small>
+      </label>
+
+      <label class="check" id="similar-toggle" hidden>
+        <input type="checkbox" id="include-similar" checked> Also play sonically similar artists
+      </label>
+
+      <details class="advanced">
+        <summary>Advanced — override any part of the station struct</summary>
+        <p class="muted small">
+          JSON merged into the station. Example:
+          <code>{"crossfade": {"default_seconds": 12}, "access": {"visibility": "private"}}</code>
+        </p>
+        <textarea id="overrides" rows="5" spellcheck="false" placeholder="{}"></textarea>
+      </details>
+
+      <div class="form-actions">
+        <button class="btn primary" type="submit">Create station</button>
+        <span id="quick-status" class="muted"></span>
+      </div>
+    </form>
+    <aside class="template-note" id="template-note"></aside>
+  </section>
+
+  <h2>Existing stations</h2>
+  <section id="admin-list" class="admin-list"><p class="muted">Loading…</p></section>
+</main>
+{% endblock %}
+{% block scripts %}<script>initAdmin();</script>{% endblock %}

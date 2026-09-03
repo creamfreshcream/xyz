@@ -1,0 +1,165 @@
+# Station definitions.
+#
+# Copy to stations.yaml (or let the app write it on first start) and edit.
+# Every field below is optional except id, name and sources - the defaults come
+# from the structs in app/models.py.
+#
+# After editing by hand: docker compose restart radio
+
+stations:
+
+  # --------------------------------------------------------------------------
+  # 1. A genre station with long, beat-matched DJ blends.
+  # --------------------------------------------------------------------------
+  - id: deep-house
+    name: Deep House Nights
+    description: Non-stop deep house, mixed like a set.
+    genre_tag: Deep House
+    sources:
+      - kind: genre
+        genres: [Deep House, House, Nu Disco]
+        match: any          # 'all' = a track must carry every genre
+        limit: 800
+    filters:
+      duration_min_seconds: 120
+      exclude_title_keywords: [interlude, skit]
+    crossfade:
+      mode: smart           # smart | fixed | cut
+      default_seconds: 10
+      min_seconds: 4
+      max_seconds: 20
+      curve: linear
+      beat_align: true      # snap the blend to 16 or 32 beats
+      beat_lengths: [16, 32]
+      bass_swap: true       # high-pass the outgoing track so basslines never collide
+      bass_swap_hz: 180
+    rotation:
+      flow: smart           # similarity walk through tempo, key, energy and mood
+      temperature: 0.25     # 0 = always the closest match, 1 = shuffle
+      no_repeat_tracks: 120
+      no_repeat_artist_tracks: 12
+    stream:
+      format: mp3
+      bitrate: 192
+      always_on: false      # start the engine when the first listener connects
+      idle_timeout_seconds: 300
+    access:
+      visibility: listed    # listed | private | public (public = no auth!)
+      allowed_roles: [admin, listener]
+
+  # --------------------------------------------------------------------------
+  # 2. A mood station (needs AudioMuse) with soft, long dissolves.
+  # --------------------------------------------------------------------------
+  - id: sunday-morning
+    name: Sunday Morning
+    description: Everything calm, warm and acoustic.
+    sources:
+      - kind: mood
+        moods: [calm, warm, acoustic]
+        min_score: 0.5
+        match: any
+    filters:
+      energy_max: 0.55
+    crossfade:
+      mode: smart
+      default_seconds: 12
+      min_seconds: 6
+      max_seconds: 24
+      curve: s_curve
+      beat_align: false
+      bass_swap: false
+
+  # --------------------------------------------------------------------------
+  # 3. Artist radio: the artist plus sonically similar company.
+  # --------------------------------------------------------------------------
+  - id: miles-radio
+    name: Miles Davis Radio
+    description: Miles Davis and friends.
+    sources:
+      - kind: artist
+        artists: [Miles Davis]
+        include_similar: true      # widen to similar artists
+        similar_limit: 25
+        include_appearances: true  # also features and compilations
+        weight: 2.0                # pulled twice as often as the source below
+      - kind: genre
+        genres: [Jazz, Bebop]
+        weight: 1.0
+    crossfade:
+      mode: smart
+      default_seconds: 3
+      max_seconds: 6
+      bass_swap: false
+
+  # --------------------------------------------------------------------------
+  # 4. Whole library, with a different energy level per time of day.
+  # --------------------------------------------------------------------------
+  - id: shuffle
+    name: Shuffle Everything
+    description: The whole library, sequenced by feel.
+    sources:
+      - kind: library
+    rotation:
+      flow: energy_curve
+      queue_depth: 8
+    dayparts:
+      - name: night
+        start: "22:00"
+        end: "06:00"
+        energy_target: 0.25
+        crossfade_seconds: 12
+      - name: morning
+        start: "06:00"
+        end: "11:00"
+        energy_target: 0.45
+      - name: day
+        start: "11:00"
+        end: "22:00"
+        energy_target: 0.65
+    stream:
+      always_on: true       # this one is always on air
+
+  # --------------------------------------------------------------------------
+  # 5. "Sounds like these tracks" - AudioMuse similarity around seeds.
+  # --------------------------------------------------------------------------
+  - id: discovery
+    name: Discovery
+    description: Tracks that sound like my favourites.
+    sources:
+      - kind: similar
+        seeds:
+          - "Boards of Canada - Roygbiv"
+          - "Aphex Twin - Xtal"
+        radius: 0.6         # 0 = near clones, 1 = loosely related
+        limit: 400
+    filters:
+      require_analysis: true   # only tracks AudioMuse has analysed
+    access:
+      visibility: private      # hidden from non-admins
+      allowed_users: []        # or restrict to named users
+
+  # --------------------------------------------------------------------------
+  # 6. A private workout station with punchy transitions and station IDs.
+  # --------------------------------------------------------------------------
+  - id: workout
+    name: Workout
+    description: High energy, tight tempo, no ballads.
+    sources:
+      - kind: genre
+        genres: [Drum and Bass, Techno, Big Beat]
+    filters:
+      energy_min: 0.6
+      bpm_min: 110
+      bpm_max: 180
+    crossfade:
+      mode: smart
+      default_seconds: 5
+      curve: exponential     # slam into the higher-energy track
+      energy_jump_cut: 0.6
+    sweepers:
+      enabled: false
+      playlist: Station IDs  # a Jellyfin playlist of jingles
+      every_tracks: 8
+    access:
+      visibility: listed
+      allowed_users: [me]    # only this user (admins always have access)

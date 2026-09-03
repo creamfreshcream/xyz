@@ -1,0 +1,30 @@
+services:
+  radio:
+    build: .
+    image: jellyfin-radio:latest
+    container_name: jellyfin-radio
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${RADIO_PORT:-8000}:8000"
+    volumes:
+      # Station definitions (YAML) - edit by hand or let the hub write them.
+      # The container runs as uid 10001, so this directory must be writable by
+      # it:  chown -R 10001:10001 ./config
+      - ./config:/config
+      # Users, revoked tokens, play history, analysis cache
+      - radio-data:/data
+    # Uncomment if Jellyfin runs in the same compose project:
+    # networks: [media]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  radio-data:
+
+# networks:
+#   media:
+#     external: true

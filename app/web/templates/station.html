@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Station · {{ app_name }}{% endblock %}
+{% block body %}
+{% include "_nav.html" %}
+<main class="wrap" data-station="{{ station_id }}" data-role="{{ user.role }}">
+  <a class="back" href="/">← All stations</a>
+  <div id="station-detail"><p class="muted">Loading…</p></div>
+</main>
+{% include "_player.html" %}
+{% endblock %}
+{% block scripts %}<script>initStation('{{ station_id }}', '{{ user.role }}');</script>{% endblock %}

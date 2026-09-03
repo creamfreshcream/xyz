@@ -1,0 +1,9 @@
+<header class="topbar">
+  <a class="brand" href="/"><span class="mark">📻</span> {{ app_name }}</a>
+  <nav>
+    <a href="/">Hub</a>
+    {% if user.role == 'admin' %}<a href="/admin">Stations</a>{% endif %}
+    <span class="who">{{ user.username }} <em>{{ user.role }}</em></span>
+    <button class="btn ghost" onclick="logout()">Sign out</button>
+  </nav>
+</header>
