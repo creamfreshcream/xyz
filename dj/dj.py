@@ -451,13 +451,17 @@ def build_bridge(jf: Jellyfin, from_id: str | None, to_id: str, max_tracks: int)
         return []
     # Drop the first hop -- it's `from_id` itself, already playing/queued.
     path = path[1:]
+    if not path:
+        return []
     if len(path) > max_tracks:
         # Evenly subsample rather than truncate, so the far end of the path
-        # (closest to the target) is still reached instead of cut off.
+        # is still reached instead of cut off -- always keep the actual last
+        # hop rather than re-deriving it, since find_path's own path doesn't
+        # necessarily land exactly on `to_id` (e.g. when max_steps truncates).
         step = len(path) / max_tracks
-        path = [path[int(i * step)] for i in range(max_tracks)]
-        if path[-1]["item_id"] != to_id:
-            path.append(next(p for p in jf.find_path(from_id, to_id, max_steps=300) if p["item_id"] == to_id))
+        sampled = [path[int(i * step)] for i in range(max_tracks - 1)]
+        sampled.append(path[-1])
+        path = sampled
     return path
 
 
@@ -528,7 +532,10 @@ class Dj:
         self.catalogue = Catalogue(cfg)
         self.schedule = load_schedule(cfg.schedule_file)
         self.state = DjState.load(cfg.state_file)
-        self._lock = threading.Lock()
+        # RLock, not Lock: run()'s main loop holds this for the whole tick,
+        # and _next_target() (called from inside that tick) also takes it to
+        # read/clear a manual override -- a plain Lock would self-deadlock.
+        self._lock = threading.RLock()
 
     def status_payload(self) -> dict[str, Any]:
         with self._lock:
