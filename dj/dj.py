@@ -386,8 +386,17 @@ class AlbumIndex:
         disc = item.get("ParentIndexNumber") or 1
         if (prev.get("ParentIndexNumber") or 1) != disc:
             return None
-        seconds = (prev.get("RunTimeTicks") or 0) / 10_000_000
-        return prev if 0 < seconds < PRELUDE_MAX_SECONDS else None
+        return prev if self._is_short(prev) else None
+
+    def main_of(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        """The reverse of prelude_of(): if `item` is itself short enough
+        (<60s) to be a prelude, the track it leads into on the album."""
+        return self.next_track(item) if self._is_short(item) else None
+
+    @staticmethod
+    def _is_short(item: dict[str, Any]) -> bool:
+        seconds = (item.get("RunTimeTicks") or 0) / 10_000_000
+        return 0 < seconds < PRELUDE_MAX_SECONDS
 
 
 def _escape(value: str) -> str:
@@ -1121,7 +1130,9 @@ class Dj:
             corrected to whatever really follows the previous track on its
             own album, unless that track is itself excluded.
           * a short prelude preceding this track on its album completes it
-            (gets prepended) with PRELUDE_CHANCE odds.
+            (gets prepended) with PRELUDE_CHANCE odds -- and the reverse:
+            if this track IS such a short prelude, its own main track
+            completes it (gets appended) with the same odds.
           * every resulting pair that's genuinely album-consecutive is
             tagged 'segue' so radio.liq hard-cuts instead of crossfading.
 
@@ -1153,7 +1164,13 @@ class Dj:
         if prelude and random.random() < PRELUDE_CHANCE:
             resolved_prelude = self._full_item(prelude)
             if resolved_prelude:
-                sequence = [resolved_prelude, full]
+                sequence.insert(0, resolved_prelude)
+
+        main = self.album_index.main_of(full)
+        if main and random.random() < PRELUDE_CHANCE:
+            resolved_main = self._full_item(main)
+            if resolved_main:
+                sequence.append(resolved_main)
 
         prior = previous
         for track in sequence:
