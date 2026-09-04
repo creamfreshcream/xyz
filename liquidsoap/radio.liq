@@ -180,9 +180,17 @@ def smart_transition(a, b) =
   # pair. Overrides the dB-based decision entirely: albums are sequenced by
   # the artist, a blended transition would work against that.
   let segue = list.assoc(default="false", "segue", b_meta) == "true"
+  # Set by the dj service (annotate: ...,liq_cross_duration="N":...) for a
+  # daypart with crossfade_seconds configured, e.g. a techno night wanting
+  # a long continuous-mix-style blend instead of the station's usual few
+  # seconds. Same metadata field cross()'s own override_duration reads for
+  # how much it buffers around this transition, reused here so the actual
+  # blend below has enough buffered audio to use its full length.
+  let blend_duration = float_of_string(default=crossfade_duration, list.assoc(default="", "liq_cross_duration", b_meta))
+  let blend_note = if blend_duration != crossfade_duration then " [blend: #{blend_duration}s]" else "" end
   let segue_note = if segue then " [segue: album-consecutive, no crossfade]" else "" end
   log(label="smart_crossfade", level=3,
-    "#{a_title} (#{a_level}dB) -> #{b_title} (#{b_level}dB)#{segue_note}")
+    "#{a_title} (#{a_level}dB) -> #{b_title} (#{b_level}dB)#{segue_note}#{blend_note}")
   # Icecast's title was found live to get stuck on whatever track was
   # playing when the stream started, never updating on later transitions --
   # output.icecast's own automatic ICY-update detection doesn't reliably
@@ -204,16 +212,16 @@ def smart_transition(a, b) =
     add(normalize=false, [fade.out(duration=0.01, a_source), fade.in(duration=0.01, b_source)])
   elsif a_level >= crossfade_high_db and b_level >= crossfade_high_db then
     log(label="smart_crossfade", level=3, "  decision: crossfade (both loud)")
-    add(normalize=false, [fade.out(duration=crossfade_duration, a_source), fade.in(duration=crossfade_duration, b_source)])
+    add(normalize=false, [fade.out(duration=blend_duration, a_source), fade.in(duration=blend_duration, b_source)])
   elsif a_level < crossfade_low_db or b_level < crossfade_low_db then
     log(label="smart_crossfade", level=3, "  decision: hard cut (one side too quiet to blend)")
     add(normalize=false, [fade.out(duration=0.01, a_source), fade.in(duration=0.01, b_source)])
   elsif abs(a_level - b_level) <= crossfade_margin_db then
     log(label="smart_crossfade", level=3, "  decision: crossfade (similar levels)")
-    add(normalize=false, [fade.out(duration=crossfade_duration, a_source), fade.in(duration=crossfade_duration, b_source)])
+    add(normalize=false, [fade.out(duration=blend_duration, a_source), fade.in(duration=blend_duration, b_source)])
   else
     log(label="smart_crossfade", level=3, "  decision: fade (level mismatch)")
-    add(normalize=false, [fade.out(duration=crossfade_duration, a_source), fade.in(duration=crossfade_duration, b_source)])
+    add(normalize=false, [fade.out(duration=blend_duration, a_source), fade.in(duration=blend_duration, b_source)])
   end
 end
 

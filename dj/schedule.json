@@ -10,12 +10,16 @@
       "exploration": "low"
     },
     {
+      "_comment": "bpm_match orders picks by tempo closeness (Catalogue.tempo_of, octave-error-corrected) instead of pure shuffle, so the groove doesn't jump around. crossfade_seconds blends transitions over that many seconds instead of the station's usual few (see radio.liq's smart_transition) -- closer to a continuous mix, though there's no real beatmatching/tempo-stretching behind it, just a longer loudness-aware blend between tracks already picked for similar tempo. exclude_artists is a hard artist-name filter, applied to both the genre/tag pool and (via retry) the mood-fallback pick -- Laibach kept surfacing here despite not fitting.",
       "name": "techno_party_thursday",
       "days": [3],
       "hours": [20, 22],
       "genres": ["Techno"],
       "mood": {"party": 0.9, "danceable": 0.9, "aggressive": 0.4, "happy": 0.5},
-      "exploration": "medium"
+      "exploration": "medium",
+      "bpm_match": true,
+      "crossfade_seconds": 20,
+      "exclude_artists": ["Laibach"]
     },
     {
       "name": "techno_party_weekend",
@@ -23,7 +27,10 @@
       "hours": [20, 2],
       "genres": ["Techno"],
       "mood": {"party": 0.9, "danceable": 0.9, "aggressive": 0.4, "happy": 0.5},
-      "exploration": "medium"
+      "exploration": "medium",
+      "bpm_match": true,
+      "crossfade_seconds": 20,
+      "exclude_artists": ["Laibach"]
     },
     {
       "_comment": "Daily 16:00-17:00 theme hour, a different one each weekday -- picked from AudioMuse-AI's genre/vocal-type classifier tags (see the top-level comment), sized by how many tracks in the library actually carry each tag as of 2026-09-04: Hip-Hop 1917, jazz 1811, metal+heavy metal 2335, punk 728, 80s 382, House 516, ambient+chillout 5191.",
@@ -94,6 +101,20 @@
       "name": "daytime_danceable_floor",
       "hours": [10, 20],
       "min": {"danceable": 0.35}
+    },
+    {
+      "_comment": "Mirrors techno_party_thursday's own window exactly (see dayparts above) -- higher than the daytime floor, on top of the daypart's own mood target already aiming for danceable 0.9.",
+      "name": "techno_night_thursday_danceable_floor",
+      "days": [3],
+      "hours": [20, 22],
+      "min": {"danceable": 0.75}
+    },
+    {
+      "_comment": "Mirrors techno_party_weekend's own window exactly.",
+      "name": "techno_night_weekend_danceable_floor",
+      "days": [4, 5],
+      "hours": [20, 2],
+      "min": {"danceable": 0.75}
     }
   ]
 }

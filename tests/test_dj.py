@@ -149,6 +149,18 @@ def test_annotate_uri_skips_items_without_an_id():
     assert annotate_uri({"Name": "orphan"}, FakeJellyfin()) is None
 
 
+def test_annotate_uri_carries_a_crossfade_override():
+    uri = annotate_uri(
+        {"Id": "1", "Name": "T", "Artists": ["A"], "crossfade_override": 20}, FakeJellyfin()
+    )
+    assert 'liq_cross_duration="20"' in uri
+
+
+def test_annotate_uri_omits_liq_cross_duration_without_an_override():
+    uri = annotate_uri({"Id": "1", "Name": "T", "Artists": ["A"]}, FakeJellyfin())
+    assert "liq_cross_duration" not in uri
+
+
 class FakePathJellyfin:
     def __init__(self, path):
         self._path = path
@@ -276,6 +288,35 @@ def test_catalogue_meets_minimums_checks_every_dimension():
     cat._by_id = {"t": {"danceable": 0.6, "happy": 0.2}}
     assert cat.meets_minimums("t", {"danceable": 0.5}) is True
     assert cat.meets_minimums("t", {"danceable": 0.5, "happy": 0.5}) is False
+
+
+def test_catalogue_tempo_of_returns_none_for_unknown_track():
+    cat = Catalogue(config())
+    assert cat.tempo_of("nope") is None
+
+
+def test_catalogue_tempo_of_returns_none_for_a_zero_or_missing_tempo():
+    cat = Catalogue(config())
+    cat._tempo_by_id = {"zero": 0.0}
+    assert cat.tempo_of("zero") is None
+
+
+def test_catalogue_tempo_of_passes_through_a_plausible_tempo():
+    cat = Catalogue(config())
+    cat._tempo_by_id = {"t": 128.0}
+    assert cat.tempo_of("t") == 128.0
+
+
+def test_catalogue_tempo_of_corrects_a_halved_octave_error():
+    cat = Catalogue(config())
+    cat._tempo_by_id = {"t": 46.0}  # true tempo is very likely ~92 or ~184
+    assert cat.tempo_of("t") == 92.0
+
+
+def test_catalogue_tempo_of_corrects_a_doubled_octave_error():
+    cat = Catalogue(config())
+    cat._tempo_by_id = {"t": 340.0}
+    assert cat.tempo_of("t") == 170.0
 
 
 def test_active_min_dims_is_empty_outside_the_window():
@@ -447,6 +488,53 @@ def test_pick_preferred_combines_artists_and_tags(tmp_path, monkeypatch):
     assert ids == {"1", "2"}
 
 
+def test_preference_pool_filters_out_excluded_artists(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin(by_genre={"Techno": [
+        {"Id": "1", "Name": "Fits", "Artists": ["Some Artist"]},
+        {"Id": "2", "Name": "Doesn't fit", "Artists": ["Laibach"]},
+    ]})
+    for _ in range(10):
+        picked = dj._pick_preferred(
+            {"genres": ["Techno"], "exclude_artists": ["Laibach"]}, exclude=set()
+        )
+        assert picked["item_id"] == "1"
+
+
+def test_preference_pool_excluded_artist_match_is_case_insensitive(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin(by_genre={"Techno": [
+        {"Id": "1", "Name": "Doesn't fit", "Artists": ["laibach"]},
+    ]})
+    assert dj._pick_preferred({"genres": ["Techno"], "exclude_artists": ["Laibach"]}, exclude=set()) is None
+
+
+def test_next_target_retries_the_mood_fallback_past_an_excluded_artist(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{
+        "name": "x", "hours": [0, 24], "mood": {"party": 1.0}, "exclude_artists": ["Laibach"],
+    }])
+
+    class FakeArtistJellyfin:
+        def item(self, item_id):
+            return {
+                "bad": {"Name": "Bad Pick", "Artists": ["Laibach"]},
+                "good": {"Name": "Good Pick", "Artists": ["Some Artist"]},
+            }[item_id]
+
+    dj.jf = FakeArtistJellyfin()
+    monkeypatch.setattr(dj.catalogue, "refresh", lambda: None)
+    calls = []
+
+    def fake_pick_target(mood, exclude_ids, exploration, min_dims=None):
+        calls.append(set(exclude_ids))
+        return {"item_id": "good"} if "bad" in exclude_ids else {"item_id": "bad"}
+
+    monkeypatch.setattr(dj.catalogue, "pick_target", fake_pick_target)
+    target = dj._next_target()
+    assert target["item_id"] == "good"
+    assert len(calls) == 2
+
+
 class FakeItemJellyfin:
     def item(self, item_id):
         return {"Name": item_id, "Artists": []}
@@ -484,6 +572,82 @@ def test_pick_preferred_many_returns_distinct_picks_up_to_n(tmp_path):
 def test_pick_preferred_many_returns_empty_without_artists_genres_or_tags(tmp_path):
     dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
     assert dj._pick_preferred_many({"mood": {}}, exclude=set(), n=3) == []
+
+
+def test_bias_by_tempo_sorts_closest_first(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.catalogue._tempo_by_id = {"far": 90.0, "near": 128.0, "exact": 130.0}
+    pool = [{"Id": "far"}, {"Id": "near"}, {"Id": "exact"}]
+    ranked = dj._bias_by_tempo(pool, reference_tempo=130.0)
+    assert [t["Id"] for t in ranked] == ["exact", "near", "far"]
+
+
+def test_bias_by_tempo_is_a_noop_without_a_reference(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    pool = [{"Id": "a"}, {"Id": "b"}]
+    assert dj._bias_by_tempo(pool, reference_tempo=None) == pool
+
+
+def test_order_by_tempo_walk_builds_a_smooth_sequence(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.catalogue._tempo_by_id = {"a": 100.0, "b": 140.0, "c": 105.0, "d": 135.0}
+    items = [{"Id": "a"}, {"Id": "b"}, {"Id": "c"}, {"Id": "d"}]
+    walked = dj._order_by_tempo_walk(items, start_tempo=102.0)
+    # From 102: nearest is a(100), then c(105), then d(135) or b(140) -- both
+    # remaining are far, but d(135) is closer to c(105) than b(140) is.
+    assert [t["Id"] for t in walked] == ["a", "c", "d", "b"]
+
+
+def test_order_by_tempo_walk_handles_no_starting_tempo(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.catalogue._tempo_by_id = {"a": 100.0, "b": 140.0}
+    items = [{"Id": "a"}, {"Id": "b"}]
+    walked = dj._order_by_tempo_walk(items, start_tempo=None)
+    assert {t["Id"] for t in walked} == {"a", "b"}
+    assert len(walked) == 2
+
+
+def test_pick_preferred_bpm_match_favours_tracks_near_the_current_tempo(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    # 5 "close" candidates so pool[:5]'s cutoff genuinely excludes "far"
+    # rather than trivially including everything in a tiny pool.
+    close_ids = [f"close{i}" for i in range(5)]
+    dj.jf = FakePreferenceJellyfin(by_artist={"A": [
+        {"Id": "far", "Name": "Far", "Artists": ["A"]},
+        *[{"Id": cid, "Name": cid, "Artists": ["A"]} for cid in close_ids],
+    ]})
+    dj.catalogue._tempo_by_id = {"far": 200.0, "current": 130.0}
+    for i, cid in enumerate(close_ids):
+        dj.catalogue._tempo_by_id[cid] = 128.0 + i * 0.1
+    dj.state.last_item_id = "current"
+    for _ in range(15):
+        picked = dj._pick_preferred({"artists": ["A"], "bpm_match": True}, exclude=set())
+        assert picked["item_id"] != "far"
+
+
+def test_pick_preferred_ignores_tempo_when_bpm_match_is_not_set(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin(by_artist={"A": [
+        {"Id": "far", "Name": "Far", "Artists": ["A"]},
+    ]})
+    dj.catalogue._tempo_by_id = {"far": 60.0, "current": 130.0}
+    dj.state.last_item_id = "current"
+    picked = dj._pick_preferred({"artists": ["A"]}, exclude=set())
+    assert picked["item_id"] == "far"
+
+
+def test_pick_preferred_many_bpm_match_orders_the_batch_as_a_tempo_walk(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin(by_artist={"A": [
+        {"Id": "a", "Name": "A", "Artists": ["A"]},
+        {"Id": "b", "Name": "B", "Artists": ["A"]},
+        {"Id": "c", "Name": "C", "Artists": ["A"]},
+    ]})
+    dj.catalogue._tempo_by_id = {"a": 100.0, "b": 140.0, "c": 105.0}
+    picked = dj._pick_preferred_many(
+        {"artists": ["A"], "bpm_match": True}, exclude=set(), n=3, tempo_walk_start=102.0
+    )
+    assert [p["item_id"] for p in picked] == ["a", "c", "b"]
 
 
 def test_refill_plan_uses_the_themed_pool_for_dwell_on_a_themed_daypart(tmp_path, monkeypatch):
@@ -537,6 +701,35 @@ def test_refill_plan_uses_the_full_bridge_cap_for_non_themed_dayparts(tmp_path, 
     monkeypatch.setattr("dj.dj.build_dwell", lambda *a, **k: [])
     dj._refill_plan()
     assert captured["max_tracks"] == dj.cfg.bridge_max_tracks
+
+
+def test_refill_plan_tags_every_plan_item_with_crossfade_override(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{
+        "name": "x", "hours": [0, 24], "tags": ["techno"], "mood": {}, "crossfade_seconds": 20,
+    }])
+    dj.jf = FakePreferenceJellyfin(by_ids={
+        "1": {"Id": "1", "Name": "Target", "Artists": []},
+        "2": {"Id": "2", "Name": "Dwell", "Artists": []},
+    })
+    monkeypatch.setattr(
+        dj.catalogue, "tag_pool",
+        lambda tags, exclude, min_score=0.3: [i for i in ["1", "2"] if i not in exclude],
+    )
+    monkeypatch.setattr("dj.dj.build_bridge", lambda jf, from_id, to_id, max_tracks: [])
+    dj._refill_plan()
+    assert len(dj.state.plan) == 2
+    assert all(item["crossfade_override"] == 20 for item in dj.state.plan)
+
+
+def test_refill_plan_does_not_tag_plan_items_without_crossfade_seconds(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {"happy": 1.0}}])
+    dj.jf = FakeItemJellyfin()
+    dj.catalogue._tracks = [{"item_id": "1", "mood": {"happy": 1.0}}]
+    monkeypatch.setattr(dj.catalogue, "refresh", lambda: None)
+    monkeypatch.setattr("dj.dj.build_bridge", lambda jf, from_id, to_id, max_tracks: [])
+    monkeypatch.setattr("dj.dj.build_dwell", lambda *a, **k: [])
+    dj._refill_plan()
+    assert "crossfade_override" not in dj.state.plan[0]
 
 
 def test_discard_plan_on_daypart_change_clears_a_stale_plan(tmp_path):
@@ -1063,3 +1256,12 @@ def test_apply_album_awareness_falls_back_to_the_original_item_on_lookup_failure
     dj.jf = FakeAlbumJellyfin({})
     item = {"item_id": "missing", "title": "T", "author": "A"}
     assert dj._apply_album_awareness(item) == [item]
+
+
+def test_apply_album_awareness_carries_crossfade_override_onto_the_resolved_track(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    a1 = make_track("a1", "alb", 1, artists=["Artist A"])
+    dj.jf = FakeAlbumJellyfin({"a1": a1})
+    item = {"item_id": "a1", "crossfade_override": 20}
+    result = dj._apply_album_awareness(item)
+    assert result[0]["crossfade_override"] == 20

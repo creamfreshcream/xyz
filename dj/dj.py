@@ -428,6 +428,14 @@ def annotate_uri(item: dict[str, Any], jf: Jellyfin) -> str | None:
         # of the usual dB-based crossfade decision -- set when this track is
         # genuinely album-consecutive with whatever precedes it.
         fields["segue"] = "true"
+    if item.get("crossfade_override"):
+        # Read by radio.liq's smart_transition/cross() as the blend duration
+        # to use for this track's incoming transition instead of the
+        # station's usual few seconds -- set by a daypart's
+        # crossfade_seconds (e.g. a techno night's continuous-mix feel).
+        # liq_cross_duration is cross()'s own built-in per-track override
+        # metadata field name, reused here rather than inventing a new one.
+        fields["liq_cross_duration"] = str(item["crossfade_override"])
     annotations = ",".join(f'{k}="{_escape(v)}"' for k, v in fields.items() if v)
     return f"annotate:{annotations}:{jf.stream_url(item_id)}"
 
@@ -477,6 +485,7 @@ class Catalogue:
         self._jellyfin_server_id: str | None = None
         self._tracks: list[dict[str, Any]] = []
         self._by_id: dict[str, dict[str, float]] = {}
+        self._tempo_by_id: dict[str, float] = {}
         self._loaded_at: float = 0.0
 
     def _server_id(self, cur) -> str:
@@ -498,7 +507,7 @@ class Catalogue:
             server_id = self._server_id(cur)
             cur.execute(
                 """
-                SELECT tsm.provider_track_id, s.other_features
+                SELECT tsm.provider_track_id, s.other_features, s.tempo
                 FROM track_server_map tsm
                 JOIN score s ON s.item_id = tsm.item_id
                 WHERE tsm.server_id = %s AND s.other_features IS NOT NULL
@@ -509,13 +518,32 @@ class Catalogue:
         finally:
             conn.close()
         self._tracks = [
-            {"item_id": jf_id, "mood": parse_feature_string(feat)}
-            for jf_id, feat in rows
+            {"item_id": jf_id, "mood": parse_feature_string(feat), "tempo": tempo}
+            for jf_id, feat, tempo in rows
             if jf_id
         ]
         self._by_id = {t["item_id"]: t["mood"] for t in self._tracks}
+        self._tempo_by_id = {t["item_id"]: t["tempo"] for t in self._tracks if t["tempo"]}
         self._loaded_at = time.time()
         log.info("Catalogue refreshed: %d candidate tracks", len(self._tracks))
+
+    def tempo_of(self, item_id: str) -> float | None:
+        """Octave-corrected BPM for item_id, or None if unknown. Automatic
+        BPM detectors commonly report half or double the true tempo (an
+        "octave error") -- found live in this library's own Techno genre
+        tracks: stddev of 25 BPM around a 118 BPM mean, with outliers as low
+        as 46 and as high as 170, is far too wide for a genre that's
+        normally tightly clustered around 120-140. Folding into a plausible
+        dance-music band doesn't recover the true value, but it stops an
+        obviously-halved/doubled reading from wrecking a tempo comparison."""
+        tempo = self._tempo_by_id.get(item_id)
+        if not tempo or tempo <= 0:
+            return None
+        while tempo < 90.0:
+            tempo *= 2
+        while tempo > 180.0:
+            tempo /= 2
+        return tempo
 
     def meets_minimums(self, item_id: str, min_dims: dict[str, float]) -> bool:
         """True when item_id has no known mood data (nothing to filter on,
@@ -1098,10 +1126,26 @@ class Dj:
 
         self.catalogue.refresh()
         exploration = daypart.get("exploration", "medium")
-        candidate = self.catalogue.pick_target(daypart["mood"], exclude, exploration, min_dims=min_dims)
+        # Catalogue._tracks has no artist names (just item_id/mood/tempo), so
+        # exclude_artists can't be applied inside pick_target itself -- retry
+        # a bounded number of times against the resolved Jellyfin item
+        # instead, adding each rejected pick to the exclude set. Gives up
+        # and accepts the last candidate anyway after a few tries rather
+        # than looping forever or failing outright.
+        excluded_artists = {a.strip().lower() for a in (daypart.get("exclude_artists") or [])}
+        candidate: dict[str, Any] | None = None
+        item: dict[str, Any] | None = None
+        for _ in range(6):
+            candidate = self.catalogue.pick_target(daypart["mood"], exclude, exploration, min_dims=min_dims)
+            if not candidate:
+                break
+            item = self.jf.item(candidate["item_id"])
+            artists = {a.strip().lower() for a in (item.get("Artists") or [])} if item else set()
+            if not excluded_artists or not artists & excluded_artists:
+                break
+            exclude = exclude | {candidate["item_id"]}
         if not candidate:
             raise RuntimeError("No candidate tracks available at all")
-        item = self.jf.item(candidate["item_id"])
         return {
             "item_id": candidate["item_id"],
             "title": item.get("Name") if item else None,
@@ -1131,13 +1175,17 @@ class Dj:
             if len(ids) > 150:
                 ids = random.sample(ids, 150)
             pool.extend(self.jf.items_by_ids(ids))
+        excluded_artists = {a.strip().lower() for a in (daypart.get("exclude_artists") or [])}
         seen: set[str] = set()
         unique: list[dict[str, Any]] = []
         for item in pool:
             item_id = item.get("Id")
-            if item_id and item_id not in exclude and item_id not in seen:
-                seen.add(item_id)
-                unique.append(item)
+            if not item_id or item_id in exclude or item_id in seen:
+                continue
+            if excluded_artists and any(a.strip().lower() in excluded_artists for a in (item.get("Artists") or [])):
+                continue
+            seen.add(item_id)
+            unique.append(item)
         if min_dims:
             # Same soft-floor behaviour as Catalogue.pick_target: prefer
             # tracks that clear it, but a themed pool full of atmospheric
@@ -1146,6 +1194,48 @@ class Dj:
             if floored:
                 unique = floored
         return unique
+
+    def _bias_by_tempo(
+        self, pool: list[dict[str, Any]], reference_tempo: float | None
+    ) -> list[dict[str, Any]]:
+        """Sorts pool by closeness to reference_tempo (octave-corrected via
+        Catalogue.tempo_of), items with unknown tempo pushed to the end.
+        No-op when reference_tempo itself is unknown, since there's nothing
+        to compare against."""
+        if reference_tempo is None:
+            return pool
+
+        def distance(item: dict[str, Any]) -> float:
+            tempo = self.catalogue.tempo_of(item["Id"])
+            return abs(tempo - reference_tempo) if tempo is not None else float("inf")
+
+        return sorted(pool, key=distance)
+
+    def _order_by_tempo_walk(
+        self, items: list[dict[str, Any]], start_tempo: float | None
+    ) -> list[dict[str, Any]]:
+        """Greedily orders items so each step's (octave-corrected) tempo is
+        as close as possible to the one before it, starting from
+        start_tempo -- a nearest-neighbour walk that keeps a bpm_match
+        daypart's dwell sequence groove-consistent instead of tempo-jumping
+        between tracks. Items with unknown tempo are treated as an
+        infinite jump (sorted last, one at a time) rather than dropped."""
+        remaining = list(items)
+        ordered: list[dict[str, Any]] = []
+        current_tempo = start_tempo
+        while remaining:
+            if current_tempo is None:
+                next_item = remaining.pop(0)
+            else:
+                remaining.sort(
+                    key=lambda item: abs((self.catalogue.tempo_of(item["Id"]) or -1e9) - current_tempo)
+                    if self.catalogue.tempo_of(item["Id"]) is not None
+                    else float("inf")
+                )
+                next_item = remaining.pop(0)
+            ordered.append(next_item)
+            current_tempo = self.catalogue.tempo_of(next_item["Id"]) or current_tempo
+        return ordered
 
     def _pick_preferred(
         self, daypart: dict[str, Any], exclude: set[str], min_dims: dict[str, float] | None = None
@@ -1156,10 +1246,18 @@ class Dj:
         straight from Jellyfin; `tags` go through AudioMuse-AI's own
         genre/vocal-type classifier (see Catalogue.tag_pool) -- that's how a
         themed hour can mean "this vibe, whoever's actually in the library"
-        rather than a fixed, hand-picked artist list."""
+        rather than a fixed, hand-picked artist list.
+
+        `bpm_match: true` on the daypart (e.g. a techno night) biases the
+        pick toward whatever's closest in tempo to the currently-playing
+        track, taking the 5 closest rather than the single closest to keep
+        some variety."""
         pool = self._preference_pool(daypart, exclude, min_dims)
         if not pool:
             return None
+        if daypart.get("bpm_match") and self.state.last_item_id:
+            reference_tempo = self.catalogue.tempo_of(self.state.last_item_id)
+            pool = self._bias_by_tempo(pool, reference_tempo)[:5]
         item = random.choice(pool)
         return {
             "item_id": item["Id"],
@@ -1168,7 +1266,12 @@ class Dj:
         }
 
     def _pick_preferred_many(
-        self, daypart: dict[str, Any], exclude: set[str], n: int, min_dims: dict[str, float] | None = None
+        self,
+        daypart: dict[str, Any],
+        exclude: set[str],
+        n: int,
+        min_dims: dict[str, float] | None = None,
+        tempo_walk_start: float | None = None,
     ) -> list[dict[str, Any]]:
         """Several distinct picks from the same themed pool _pick_preferred
         draws from -- used for the dwell phase of a themed daypart instead
@@ -1178,10 +1281,19 @@ class Dj:
         hour's dwell phase could drift off-theme within a track or two of
         arriving -- found live: a Friday "80s" hour was still audibly
         nowhere near 80s territory 40 minutes in, well past the single
-        target track this replaces."""
+        target track this replaces.
+
+        `bpm_match: true` on the daypart orders the whole batch as a
+        nearest-neighbour tempo walk starting from tempo_walk_start (the
+        target track's own tempo, since dwell plays right after it) instead
+        of a random shuffle, so the groove doesn't jump around."""
         pool = self._preference_pool(daypart, exclude, min_dims)
-        random.shuffle(pool)
-        picked = pool[:n]
+        if daypart.get("bpm_match"):
+            random.shuffle(pool)  # break ties/starting order before the walk
+            picked = self._order_by_tempo_walk(pool, tempo_walk_start)[:n]
+        else:
+            random.shuffle(pool)
+            picked = pool[:n]
         return [
             {"item_id": item["Id"], "title": item.get("Name"), "author": ", ".join(item.get("Artists") or [])}
             for item in picked
@@ -1209,11 +1321,20 @@ class Dj:
             # of build_dwell's sonic-similarity picks, which don't know
             # about the daypart's artists/genres/tags at all -- see
             # _pick_preferred_many's docstring.
+            tempo_walk_start = self.catalogue.tempo_of(target["item_id"]) if daypart.get("bpm_match") else None
             dwell = self._pick_preferred_many(
-                daypart, exclude, self.cfg.dwell_tracks, active_min_dims(self.constraints)
+                daypart, exclude, self.cfg.dwell_tracks, active_min_dims(self.constraints), tempo_walk_start
             )
         else:
             dwell = build_dwell(self.jf, target["item_id"], self.cfg.dwell_tracks, exclude)
+
+        crossfade_seconds = daypart.get("crossfade_seconds") if daypart else None
+        if crossfade_seconds:
+            # Read by annotate_uri/smart_transition to blend longer than the
+            # station's usual few seconds, e.g. for a techno night's
+            # continuous-mix feel -- see radio.liq.
+            for item in bridge + dwell:
+                item["crossfade_override"] = crossfade_seconds
 
         self.state.plan = bridge + dwell
         self.state.phase = "dwelling" if dwell else "transitioning"
@@ -1306,6 +1427,17 @@ class Dj:
         for track in sequence:
             track["segue"] = self.album_index.is_album_consecutive(prior, track)
             prior = track
+
+        # _full_item resolves each track fresh from the Jellyfin item cache,
+        # which doesn't carry whatever extra keys _refill_plan put on the
+        # original plan entry -- carry crossfade_override (e.g. a techno
+        # night's longer blend) forward onto whatever actually ends up
+        # pushed, swapped or not.
+        crossfade_override = item.get("crossfade_override")
+        if crossfade_override:
+            for track in sequence:
+                track["crossfade_override"] = crossfade_override
+
         return sequence
 
     def _discard_plan_on_daypart_change(self) -> None:
