@@ -50,6 +50,14 @@ jingles_dir = env("RADIO_JINGLES_DIR", "")
 jingle_every = env_int("RADIO_JINGLE_EVERY", 0)
 crossfade_duration = env_float("RADIO_CROSSFADE", 3.0)
 
+# Every mount that carries this station's audio, so a metadata push (see
+# smart_transition below) can reach all of them, not just the main one.
+radio_mounts =
+  list.append(
+    [env("RADIO_MOUNT", "/stream.mp3")],
+    if env_bool("RADIO_HQ_ENABLED", false) then [env("RADIO_HQ_MOUNT", "/stream-hq.mp3")] else [] end
+  )
+
 # ------------------------------------------------------------- metadata cleanup
 
 # Some library tags carry literal HTML entities (e.g. "&#269;" instead of "č")
@@ -144,6 +152,19 @@ def smart_transition(a, b) =
   let segue_note = if segue then " [segue: album-consecutive, no crossfade]" else "" end
   log(label="smart_crossfade", level=3,
     "#{a_title} (#{a_level}dB) -> #{b_title} (#{b_level}dB)#{segue_note}")
+  # Icecast's title was found live to get stuck on whatever track was
+  # playing when the stream started, never updating on later transitions --
+  # output.icecast's own automatic ICY-update detection doesn't reliably
+  # fire for a track that only ever appears as the "b" side of a
+  # dynamically-composed cross() transition source. Push the update
+  # explicitly here instead, since this function demonstrably runs once per
+  # real transition (the log line above proves it).
+  list.iter(fun (mount) ->
+    icy.update_metadata(
+      host=icecast_host, port=icecast_port, password=icecast_password,
+      mount=mount, b_meta
+    )
+  , radio_mounts)
   # Both "no crossfade" cases below use a near-zero-duration fade rather than
   # sequence() -- sequence() inside cross() was observed live to leave
   # Icecast's title metadata stuck on the outgoing track for many tracks
