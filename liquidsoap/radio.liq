@@ -187,7 +187,14 @@ def smart_transition(a, b) =
   # how much it buffers around this transition, reused here so the actual
   # blend below has enough buffered audio to use its full length.
   let blend_duration = float_of_string(default=crossfade_duration, list.assoc(default="", "liq_cross_duration", b_meta))
-  let blend_note = if blend_duration != crossfade_duration then " [blend: #{blend_duration}s]" else "" end
+  # A daypart with crossfade_seconds set (e.g. a techno night) wants every
+  # transition blended, not just the ones that happen to pass the dB-level
+  # checks below -- found live: two out of the first three techno-night
+  # transitions hit the "too quiet to blend" hard cut, so the long blend
+  # almost never actually played. Reusing "was liq_cross_duration set at
+  # all" as the forcing signal avoids a second metadata field.
+  let forced_blend = blend_duration != crossfade_duration
+  let blend_note = if forced_blend then " [blend: #{blend_duration}s]" else "" end
   let segue_note = if segue then " [segue: album-consecutive, no crossfade]" else "" end
   log(label="smart_crossfade", level=3,
     "#{a_title} (#{a_level}dB) -> #{b_title} (#{b_level}dB)#{segue_note}#{blend_note}")
@@ -210,6 +217,9 @@ def smart_transition(a, b) =
   if segue then
     log(label="smart_crossfade", level=3, "  decision: hard cut (album-consecutive)")
     add(normalize=false, [fade.out(duration=0.01, a_source), fade.in(duration=0.01, b_source)])
+  elsif forced_blend then
+    log(label="smart_crossfade", level=3, "  decision: crossfade (forced blend for this daypart)")
+    add(normalize=false, [fade.out(duration=blend_duration, a_source), fade.in(duration=blend_duration, b_source)])
   elsif a_level >= crossfade_high_db and b_level >= crossfade_high_db then
     log(label="smart_crossfade", level=3, "  decision: crossfade (both loud)")
     add(normalize=false, [fade.out(duration=blend_duration, a_source), fade.in(duration=blend_duration, b_source)])
