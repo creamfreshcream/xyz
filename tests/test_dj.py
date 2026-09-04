@@ -199,6 +199,17 @@ def test_dj_state_round_trips_through_a_file(tmp_path):
     assert reloaded.history[0]["title"] == "A"
 
 
+def test_dj_state_load_defaults_a_null_list_field_to_empty(tmp_path):
+    # A field added after some state files already existed on disk -- or one
+    # a prior buggy load() already round-tripped as a literal `null` -- must
+    # come back as [], not None (which crashes anything doing `x in field`).
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"last_item_id": "1", "liked_track_ids": None}))
+    state = DjState.load(str(path))
+    assert state.liked_track_ids == []
+    assert state.last_item_id == "1"
+
+
 def test_dj_state_recent_track_ids_respects_the_window(monkeypatch):
     state = DjState()
     state.history = [

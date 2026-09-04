@@ -40,7 +40,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field, fields
+from dataclasses import MISSING, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -474,12 +474,19 @@ class DjState:
                 raw = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return cls()
-        # Only pass through keys the saved file actually has and let the
-        # dataclass's own field defaults (default_factory included) apply to
-        # anything missing -- a state file from before a field was added
-        # must not silently override it with None.
-        known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        # Only pass through keys the saved file actually has, and only when
+        # not null, so the dataclass's own field defaults (default_factory
+        # included) apply instead -- a state file from before a field was
+        # added, or one a prior buggy load() already wrote a literal `null`
+        # into, must not override an empty-list default with None.
+        by_name = {f.name: f for f in fields(cls)}
+        kwargs = {}
+        for k, v in raw.items():
+            f = by_name.get(k)
+            if f is None or (v is None and f.default_factory is not MISSING):
+                continue
+            kwargs[k] = v
+        return cls(**kwargs)
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
