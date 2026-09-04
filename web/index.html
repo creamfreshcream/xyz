@@ -231,6 +231,20 @@
   audio.preload = "none";
   audio.crossOrigin = "anonymous";
 
+  // If the page itself was opened as https://user:pass@host/..., a plain
+  // relative fetch("/status-json.xsl") resolves against that and inherits
+  // the embedded credentials -- which fetch() then refuses outright
+  // ("... is an url with embedded credentials"), never even hitting the
+  // network. Building an explicit same-origin URL with the userinfo
+  // stripped avoids that; the browser still attaches its cached HTTP-auth
+  // credentials for the realm on its own, same as any other same-origin request.
+  function credentiallessUrl(path) {
+    const url = new URL(path, location.href);
+    url.username = "";
+    url.password = "";
+    return url.toString();
+  }
+
   const el = (id) => document.getElementById(id);
   const history = [];
   let mount = FALLBACK_MOUNT;
@@ -337,7 +351,7 @@
 
   async function poll() {
     try {
-      const response = await fetch(STATUS_URL, { cache: "no-store" });
+      const response = await fetch(credentiallessUrl(STATUS_URL), { cache: "no-store" });
       if (!response.ok) console.error("radio: status fetch returned", response.status);
       const source = pickSource(sources((await response.json()).icestats));
       if (!source) return setOffline();
@@ -374,7 +388,7 @@
   // failures here just leave the line hidden rather than affecting playback.
   async function pollDj() {
     try {
-      const response = await fetch(DJ_STATUS_URL, { cache: "no-store" });
+      const response = await fetch(credentiallessUrl(DJ_STATUS_URL), { cache: "no-store" });
       if (!response.ok) return;
       const status = await response.json();
       const target = status && status.target;
