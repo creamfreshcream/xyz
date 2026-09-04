@@ -408,6 +408,22 @@ def test_djstate_like_and_ban_are_idempotent():
     assert state.liked_track_ids == ["1"]
 
 
+def test_djstate_penalize_is_scoped_to_the_given_daypart():
+    state = DjState()
+    state.penalize("1", "night")
+    assert state.active_penalty_ids("night") == {"1"}
+    assert state.active_penalty_ids("morning") == set()
+    assert state.active_penalty_ids() == set()
+
+
+def test_djstate_penalize_without_a_daypart_is_global():
+    state = DjState()
+    state.penalize("1")
+    assert state.active_penalty_ids("night") == {"1"}
+    assert state.active_penalty_ids("morning") == {"1"}
+    assert state.active_penalty_ids() == {"1"}
+
+
 class FakeFeedbackJellyfin:
     def __init__(self):
         self.favorited = []
@@ -436,6 +452,17 @@ def test_record_feedback_down_bans_the_current_track(tmp_path, monkeypatch):
     assert result == {"item_id": "42", "vote": "down"}
     assert dj.state.active_penalty_ids() == {"42"}
     assert skipped == ["dj_queue.skip"]
+
+
+def test_record_feedback_down_only_bans_the_current_daypart(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakeFeedbackJellyfin()
+    dj.state.last_item_id = "42"
+    dj.state.daypart = "night"
+    monkeypatch.setattr("dj.dj.telnet_command", lambda host, port, cmd: "Done.")
+    dj.record_feedback({"vote": "down"})
+    assert dj.state.active_penalty_ids("night") == {"42"}
+    assert dj.state.active_penalty_ids("morning") == set()
 
 
 def test_record_feedback_down_on_a_non_current_track_does_not_skip(tmp_path, monkeypatch):

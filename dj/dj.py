@@ -593,21 +593,26 @@ class DjState:
             self.liked_track_ids.append(item_id)
         self.penalties.pop(item_id, None)
 
-    def penalize(self, item_id: str) -> None:
+    def penalize(self, item_id: str, daypart: str | None = None) -> None:
         # Escalating temporary ban rather than a permanent one: 1st downvote
         # -> 14 days out, 2nd -> 28, and so on. A later like() clears it.
+        # Scoped to the daypart it happened in -- a downvote during "night"
+        # says this track doesn't fit that segment, not that it's unwanted
+        # everywhere, so it stays eligible for other dayparts/theme hours.
+        # daypart=None (e.g. an older state file) means unscoped/global.
         strikes = self.penalties.get(item_id, {}).get("strikes", 0) + 1
         until = datetime.now(timezone.utc) + timedelta(days=14 * strikes)
-        self.penalties[item_id] = {"strikes": strikes, "until": until.isoformat()}
+        self.penalties[item_id] = {"strikes": strikes, "until": until.isoformat(), "daypart": daypart}
         if item_id in self.liked_track_ids:
             self.liked_track_ids.remove(item_id)
 
-    def active_penalty_ids(self) -> set[str]:
+    def active_penalty_ids(self, daypart: str | None = None) -> set[str]:
         now = datetime.now(timezone.utc)
         return {
             item_id
             for item_id, entry in self.penalties.items()
             if datetime.fromisoformat(entry["until"]) > now
+            and entry.get("daypart") in (None, daypart)
         }
 
     def record_like_event(self) -> None:
@@ -881,7 +886,7 @@ class Dj:
                 self.state.like(item_id)
                 self.state.record_like_event()
             else:
-                self.state.penalize(item_id)
+                self.state.penalize(item_id, self.state.daypart)
             self.state.save(self.cfg.state_file)
 
         if vote == "up":
@@ -909,7 +914,9 @@ class Dj:
 
         daypart = current_daypart(self.schedule)
         self.state.daypart = daypart["name"]
-        exclude = self.state.recent_track_ids(self.cfg.recent_track_window_hours) | self.state.active_penalty_ids()
+        exclude = self.state.recent_track_ids(self.cfg.recent_track_window_hours) | self.state.active_penalty_ids(
+            daypart["name"]
+        )
 
         preferred = self._pick_preferred(daypart, exclude)
         if preferred:
@@ -971,7 +978,7 @@ class Dj:
             bridge = [target]
         exclude = (
             self.state.recent_track_ids(self.cfg.recent_track_window_hours)
-            | self.state.active_penalty_ids()
+            | self.state.active_penalty_ids(self.state.daypart)
             | {target["item_id"]}
         )
         dwell = build_dwell(self.jf, target["item_id"], self.cfg.dwell_tracks, exclude)
