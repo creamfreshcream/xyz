@@ -159,10 +159,19 @@ def smart_transition(a, b) =
   # dynamically-composed cross() transition source. Push the update
   # explicitly here instead, since this function demonstrably runs once per
   # real transition (the log line above proves it).
+  #
+  # thread.run(fast=false, ...) is not optional: a first attempt called
+  # icy.update_metadata directly here, which blocked the main streaming
+  # thread on the HTTP round-trip long enough that Icecast's own read
+  # timeout fired and dropped the source connection entirely (confirmed
+  # live: "Disconnecting source due to socket timeout" ~17s after a
+  # successful update, killing the stream for all listeners).
   list.iter(fun (mount) ->
-    icy.update_metadata(
-      host=icecast_host, port=icecast_port, password=icecast_password,
-      mount=mount, b_meta
+    thread.run(fast=false, fun () ->
+      icy.update_metadata(
+        host=icecast_host, port=icecast_port, password=icecast_password,
+        mount=mount, b_meta
+      )
     )
   , radio_mounts)
   # Both "no crossfade" cases below use a near-zero-duration fade rather than
