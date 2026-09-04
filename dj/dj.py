@@ -468,6 +468,7 @@ class Catalogue:
         self.cfg = cfg
         self._jellyfin_server_id: str | None = None
         self._tracks: list[dict[str, Any]] = []
+        self._by_id: dict[str, dict[str, float]] = {}
         self._loaded_at: float = 0.0
 
     def _server_id(self, cur) -> str:
@@ -504,8 +505,22 @@ class Catalogue:
             for jf_id, feat in rows
             if jf_id
         ]
+        self._by_id = {t["item_id"]: t["mood"] for t in self._tracks}
         self._loaded_at = time.time()
         log.info("Catalogue refreshed: %d candidate tracks", len(self._tracks))
+
+    def meets_minimums(self, item_id: str, min_dims: dict[str, float]) -> bool:
+        """True when item_id has no known mood data (nothing to filter on,
+        so it's kept rather than blocked) or clears every floor in
+        min_dims -- lets a time-window floor (e.g. a minimum danceability)
+        apply to pools that don't otherwise rank by mood, like
+        Dj._pick_preferred's artist/genre/tag pool."""
+        if not min_dims:
+            return True
+        mood = self._by_id.get(item_id)
+        if mood is None:
+            return True
+        return all(mood.get(dim, 0.0) >= floor for dim, floor in min_dims.items())
 
     def tag_pool(self, tags: list[str], exclude_ids: set[str], min_score: float = 0.3) -> list[str]:
         """Jellyfin item_ids matching any of `tags` in AudioMuse-AI's own
@@ -542,7 +557,11 @@ class Catalogue:
         return matches
 
     def pick_target(
-        self, target_mood: dict[str, float], exclude_ids: set[str], exploration: str = "medium"
+        self,
+        target_mood: dict[str, float],
+        exclude_ids: set[str],
+        exploration: str = "medium",
+        min_dims: dict[str, float] | None = None,
     ) -> dict[str, Any] | None:
         if not self._tracks:
             self.refresh()
@@ -551,6 +570,18 @@ class Catalogue:
             candidates = self._tracks
         if not candidates:
             return None
+        if min_dims:
+            # A time-window floor (e.g. minimum danceability) is applied as
+            # a soft filter: prefer candidates that clear it, but an
+            # atmospheric daypart shouldn't lose every candidate just
+            # because the floor is active -- fall back to the unfiltered
+            # pool rather than ever returning nothing.
+            floored = [
+                t for t in candidates
+                if all(t["mood"].get(dim, 0.0) >= floor for dim, floor in min_dims.items())
+            ]
+            if floored:
+                candidates = floored
         ranked = sorted(candidates, key=lambda t: mood_distance(t["mood"], target_mood))
         pool_size = {"low": 5, "medium": 15, "high": 40}.get(exploration, 15)
         pool = ranked[: max(1, min(pool_size, len(ranked)))]
@@ -745,40 +776,60 @@ class DjState:
 
 # ------------------------------------------------------------------ schedule
 
-def load_schedule(path: str) -> list[dict[str, Any]]:
+def load_schedule(path: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
-    return data["dayparts"]
+    return data["dayparts"], data.get("constraints", [])
 
 
-def current_daypart(schedule: list[dict[str, Any]], now: datetime | None = None) -> dict[str, Any]:
-    now = now or datetime.now()
+def _window_matches(entry: dict[str, Any], now: datetime) -> bool:
+    """Shared hours/days window check for both dayparts and constraints."""
     hour = now.hour
     # Monday=0 .. Sunday=6, matching Python's own datetime.weekday().
     weekday = now.weekday()
     prev_weekday = (weekday - 1) % 7
+    days = entry.get("days")
 
-    def day_ok(days: list[int] | None, d: int) -> bool:
+    def day_ok(d: int) -> bool:
         return days is None or d in days
 
+    start, end = entry["hours"]
+    if start <= end:
+        return day_ok(weekday) and start <= hour < end
+    # Wraps past midnight, e.g. Fri/Sat 20:00-02:00 -- the evening part
+    # belongs to `weekday`, but the early-morning tail belongs to whichever
+    # day's evening started it, i.e. `prev_weekday`. Without this split,
+    # "Friday 01:00" (prev_weekday=Thursday, not in a Fri/Sat rule) would
+    # wrongly inherit Saturday's window a full day early.
+    evening = day_ok(weekday) and hour >= start
+    morning = day_ok(prev_weekday) and hour < end
+    return evening or morning
+
+
+def current_daypart(schedule: list[dict[str, Any]], now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now()
     for daypart in schedule:
-        days = daypart.get("days")
-        start, end = daypart["hours"]
-        if start <= end:
-            if day_ok(days, weekday) and start <= hour < end:
-                return daypart
-        else:
-            # Wraps past midnight, e.g. Fri/Sat 20:00-02:00 -- the evening
-            # part belongs to `weekday`, but the early-morning tail belongs
-            # to whichever day's evening started it, i.e. `prev_weekday`.
-            # Without this split, "Friday 01:00" (prev_weekday=Thursday,
-            # not in a Fri/Sat rule) would wrongly inherit Saturday's window
-            # a full day early.
-            evening = day_ok(days, weekday) and hour >= start
-            morning = day_ok(days, prev_weekday) and hour < end
-            if evening or morning:
-                return daypart
+        if _window_matches(daypart, now):
+            return daypart
     return schedule[0]
+
+
+def active_min_dims(constraints: list[dict[str, Any]], now: datetime | None = None) -> dict[str, float]:
+    """Hard floors active right now (e.g. a minimum danceability during
+    daytime hours), merged across every matching window -- the highest floor
+    wins per dimension if more than one constraint applies. This is a global
+    overlay on top of whichever daypart is active, not a daypart itself:
+    atmospheric/ambient dayparts still get picked during these hours, their
+    candidates just can't dip below the floor (and if the floor would empty
+    the pool entirely, the floor loses rather than the daypart -- see
+    Catalogue.pick_target/Dj._pick_preferred)."""
+    now = now or datetime.now()
+    merged: dict[str, float] = {}
+    for constraint in constraints:
+        if _window_matches(constraint, now):
+            for dim, value in (constraint.get("min") or {}).items():
+                merged[dim] = max(merged.get(dim, value), value)
+    return merged
 
 
 # ---------------------------------------------------------------------- Liquidsoap telnet
@@ -925,7 +976,7 @@ class Dj:
         self.song_map = SongMap(cfg)
         self.album_index = AlbumIndex(self.jf)
         self._item_cache: dict[str, dict[str, Any]] = {}
-        self.schedule = load_schedule(cfg.schedule_file)
+        self.schedule, self.constraints = load_schedule(cfg.schedule_file)
         self.state = DjState.load(cfg.state_file)
         # RLock, not Lock: run()'s main loop holds this for the whole tick,
         # and _next_target() (called from inside that tick) also takes it to
@@ -1025,14 +1076,15 @@ class Dj:
         exclude = self.state.recent_track_ids(self.cfg.recent_track_window_hours) | self.state.active_penalty_ids(
             daypart["name"]
         )
+        min_dims = active_min_dims(self.constraints)
 
-        preferred = self._pick_preferred(daypart, exclude)
+        preferred = self._pick_preferred(daypart, exclude, min_dims)
         if preferred:
             return preferred
 
         self.catalogue.refresh()
         exploration = daypart.get("exploration", "medium")
-        candidate = self.catalogue.pick_target(daypart["mood"], exclude, exploration)
+        candidate = self.catalogue.pick_target(daypart["mood"], exclude, exploration, min_dims=min_dims)
         if not candidate:
             raise RuntimeError("No candidate tracks available at all")
         item = self.jf.item(candidate["item_id"])
@@ -1042,7 +1094,9 @@ class Dj:
             "author": ", ".join(item.get("Artists") or []) if item else None,
         }
 
-    def _pick_preferred(self, daypart: dict[str, Any], exclude: set[str]) -> dict[str, Any] | None:
+    def _pick_preferred(
+        self, daypart: dict[str, Any], exclude: set[str], min_dims: dict[str, float] | None = None
+    ) -> dict[str, Any] | None:
         """A daypart can name specific `artists`, Jellyfin `genres`, and/or
         AudioMuse-AI classifier `tags` it wants (e.g. a themed hour) instead
         of, or alongside, a mood target. `artists`/`genres` are pulled
@@ -1066,6 +1120,13 @@ class Dj:
                 ids = random.sample(ids, 150)
             pool.extend(self.jf.items_by_ids(ids))
         pool = [item for item in pool if item.get("Id") not in exclude]
+        if min_dims:
+            # Same soft-floor behaviour as Catalogue.pick_target: prefer
+            # tracks that clear it, but a themed pool full of atmospheric
+            # tracks shouldn't be emptied out entirely by it.
+            floored = [item for item in pool if self.catalogue.meets_minimums(item["Id"], min_dims)]
+            if floored:
+                pool = floored
         if not pool:
             return None
         item = random.choice(pool)

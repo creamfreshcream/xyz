@@ -87,5 +87,13 @@
     {"name": "afternoon", "hours": [14, 18], "mood": {"party": 0.55, "aggressive": 0.45, "danceable": 0.6, "happy": 0.4}},
     {"name": "evening", "hours": [18, 23], "mood": {"party": 0.6, "danceable": 0.5, "happy": 0.45}, "exploration": "high"},
     {"name": "night", "hours": [23, 6], "mood": {"relaxed": 0.7, "sad": 0.4, "aggressive": 0.1, "party": 0.15}}
+  ],
+  "constraints": [
+    {
+      "_comment": "Soft floor, not a daypart of its own: atmospheric/ambient picks during this window still happen, they just can't be near-zero danceability. If the floor would empty a daypart's candidate pool entirely (e.g. a very ambient themed hour), the floor loses rather than the daypart -- see Catalogue.pick_target/Dj._pick_preferred.",
+      "name": "daytime_danceable_floor",
+      "hours": [10, 20],
+      "min": {"danceable": 0.35}
+    }
   ]
 }

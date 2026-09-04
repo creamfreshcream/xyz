@@ -13,10 +13,12 @@ from dj.dj import (
     DjState,
     SongMap,
     _escape,
+    active_min_dims,
     annotate_uri,
     build_bridge,
     build_dwell,
     current_daypart,
+    load_schedule,
     mood_distance,
     parse_feature_string,
 )
@@ -242,6 +244,76 @@ def test_catalogue_pick_target_excludes_recent_tracks():
     assert picked["item_id"] == "only"
 
 
+def test_catalogue_pick_target_respects_a_minimum_dimension_floor():
+    cat = Catalogue(config())
+    cat._tracks = [
+        {"item_id": "low", "mood": {"happy": 1.0, "danceable": 0.1}},
+        {"item_id": "high", "mood": {"happy": 0.9, "danceable": 0.9}},
+    ]
+    for _ in range(10):
+        picked = cat.pick_target(
+            {"happy": 1.0}, exclude_ids=set(), exploration="low", min_dims={"danceable": 0.35}
+        )
+        assert picked["item_id"] == "high"
+
+
+def test_catalogue_pick_target_floor_falls_back_rather_than_emptying_the_pool():
+    cat = Catalogue(config())
+    cat._tracks = [{"item_id": "only", "mood": {"happy": 1.0, "danceable": 0.1}}]
+    picked = cat.pick_target(
+        {"happy": 1.0}, exclude_ids=set(), exploration="low", min_dims={"danceable": 0.9}
+    )
+    assert picked["item_id"] == "only"
+
+
+def test_catalogue_meets_minimums_is_true_for_a_track_with_no_known_mood():
+    cat = Catalogue(config())
+    assert cat.meets_minimums("unknown", {"danceable": 0.5}) is True
+
+
+def test_catalogue_meets_minimums_checks_every_dimension():
+    cat = Catalogue(config())
+    cat._by_id = {"t": {"danceable": 0.6, "happy": 0.2}}
+    assert cat.meets_minimums("t", {"danceable": 0.5}) is True
+    assert cat.meets_minimums("t", {"danceable": 0.5, "happy": 0.5}) is False
+
+
+def test_active_min_dims_is_empty_outside_the_window():
+    constraints = [{"name": "c", "hours": [10, 20], "min": {"danceable": 0.35}}]
+    assert active_min_dims(constraints, datetime(2024, 1, 1, 9)) == {}
+
+
+def test_active_min_dims_returns_the_floor_inside_the_window():
+    constraints = [{"name": "c", "hours": [10, 20], "min": {"danceable": 0.35}}]
+    assert active_min_dims(constraints, datetime(2024, 1, 1, 15)) == {"danceable": 0.35}
+
+
+def test_active_min_dims_merges_overlapping_windows_by_taking_the_max():
+    constraints = [
+        {"name": "a", "hours": [10, 20], "min": {"danceable": 0.3}},
+        {"name": "b", "hours": [14, 16], "min": {"danceable": 0.5}},
+    ]
+    assert active_min_dims(constraints, datetime(2024, 1, 1, 15)) == {"danceable": 0.5}
+
+
+def test_load_schedule_returns_dayparts_and_constraints(tmp_path):
+    schedule_path = tmp_path / "schedule.json"
+    schedule_path.write_text(json.dumps({
+        "dayparts": [{"name": "x", "hours": [0, 24], "mood": {}}],
+        "constraints": [{"name": "c", "hours": [10, 20], "min": {"danceable": 0.35}}],
+    }))
+    dayparts, constraints = load_schedule(str(schedule_path))
+    assert dayparts[0]["name"] == "x"
+    assert constraints[0]["name"] == "c"
+
+
+def test_load_schedule_defaults_constraints_to_an_empty_list(tmp_path):
+    schedule_path = tmp_path / "schedule.json"
+    schedule_path.write_text(json.dumps({"dayparts": [{"name": "x", "hours": [0, 24], "mood": {}}]}))
+    _, constraints = load_schedule(str(schedule_path))
+    assert constraints == []
+
+
 class FakePreferenceJellyfin:
     """Fake covering the artist/genre/tag lookups _pick_preferred uses."""
 
@@ -305,9 +377,9 @@ def test_catalogue_tag_pool_excludes_given_ids(monkeypatch):
     assert cat.tag_pool(["female vocalists"], exclude_ids={"a"}) == []
 
 
-def make_dj(tmp_path, schedule):
+def make_dj(tmp_path, schedule, constraints=None):
     schedule_path = tmp_path / "schedule.json"
-    schedule_path.write_text(json.dumps({"dayparts": schedule}))
+    schedule_path.write_text(json.dumps({"dayparts": schedule, "constraints": constraints or []}))
     dj = Dj(config(DJ_SCHEDULE_FILE=str(schedule_path), DJ_STATE_FILE=str(tmp_path / "state.json")))
     return dj
 
@@ -322,6 +394,26 @@ def test_pick_preferred_pulls_from_named_artists(tmp_path):
     dj.jf = FakePreferenceJellyfin(by_artist={"Some Artist": [{"Id": "1", "Name": "A", "Artists": ["Some Artist"]}]})
     picked = dj._pick_preferred({"artists": ["Some Artist"]}, exclude=set())
     assert picked["item_id"] == "1"
+
+
+def test_pick_preferred_respects_a_minimum_dimension_floor(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin(by_artist={"A": [
+        {"Id": "low", "Name": "Low", "Artists": ["A"]},
+        {"Id": "high", "Name": "High", "Artists": ["A"]},
+    ]})
+    dj.catalogue._by_id = {"low": {"danceable": 0.1}, "high": {"danceable": 0.8}}
+    for _ in range(10):
+        picked = dj._pick_preferred({"artists": ["A"]}, exclude=set(), min_dims={"danceable": 0.35})
+        assert picked["item_id"] == "high"
+
+
+def test_pick_preferred_floor_falls_back_rather_than_emptying_the_pool(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin(by_artist={"A": [{"Id": "only", "Name": "Only", "Artists": ["A"]}]})
+    dj.catalogue._by_id = {"only": {"danceable": 0.1}}
+    picked = dj._pick_preferred({"artists": ["A"]}, exclude=set(), min_dims={"danceable": 0.9})
+    assert picked["item_id"] == "only"
 
 
 def test_pick_preferred_excludes_recent_tracks(tmp_path):
@@ -353,6 +445,27 @@ def test_pick_preferred_combines_artists_and_tags(tmp_path, monkeypatch):
     monkeypatch.setattr(dj.catalogue, "tag_pool", lambda tags, exclude, min_score=0.3: ["2"])
     ids = {dj._pick_preferred({"artists": ["A"], "tags": ["female vocalists"]}, exclude=set())["item_id"] for _ in range(20)}
     assert ids == {"1", "2"}
+
+
+class FakeItemJellyfin:
+    def item(self, item_id):
+        return {"Name": item_id, "Artists": []}
+
+
+def test_next_target_applies_active_constraints_to_the_mood_pick(tmp_path, monkeypatch):
+    dj = make_dj(
+        tmp_path,
+        [{"name": "x", "hours": [0, 24], "mood": {"happy": 1.0}}],
+        constraints=[{"name": "floor", "hours": [0, 24], "min": {"danceable": 0.35}}],
+    )
+    dj.jf = FakeItemJellyfin()
+    dj.catalogue._tracks = [
+        {"item_id": "low", "mood": {"happy": 1.0, "danceable": 0.1}},
+        {"item_id": "high", "mood": {"happy": 0.9, "danceable": 0.9}},
+    ]
+    monkeypatch.setattr(dj.catalogue, "refresh", lambda: None)
+    target = dj._next_target()
+    assert target["item_id"] == "high"
 
 
 class FakePlaylistJellyfin:
