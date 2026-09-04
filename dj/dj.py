@@ -202,6 +202,14 @@ class Jellyfin:
         )
         return data.get("Items", [])
 
+    def items_by_ids(self, ids: list[str]) -> list[dict[str, Any]]:
+        if not ids:
+            return []
+        data = self.get(
+            "/Items", {"Ids": ",".join(ids), "Fields": "Artists", "Recursive": "true"}
+        )
+        return data.get("Items", [])
+
     def item(self, item_id: str) -> dict[str, Any] | None:
         data = self.get(
             "/Items", {"Ids": item_id, "Fields": "Artists,Album", "Recursive": "true"}
@@ -342,6 +350,40 @@ class Catalogue:
         ]
         self._loaded_at = time.time()
         log.info("Catalogue refreshed: %d candidate tracks", len(self._tracks))
+
+    def tag_pool(self, tags: list[str], exclude_ids: set[str], min_score: float = 0.3) -> list[str]:
+        """Jellyfin item_ids matching any of `tags` in AudioMuse-AI's own
+        genre/vocal-type classifier -- confusingly stored in the `mood_vector`
+        column, not `other_features` (the actual 6-dimension mood vector used
+        by pick_target). Its vocabulary mixes genre-ish labels ("Hip-Hop",
+        "electronic") with vocal-type ones ("female vocalists"), each track
+        carrying its top handful with a confidence score -- this is what the
+        AudioMuse-AI song map colors points by."""
+        conn = pg_connect(self.cfg)
+        try:
+            cur = conn.cursor()
+            server_id = self._server_id(cur)
+            cur.execute(
+                """
+                SELECT tsm.provider_track_id, s.mood_vector
+                FROM track_server_map tsm
+                JOIN score s ON s.item_id = tsm.item_id
+                WHERE tsm.server_id = %s AND s.mood_vector IS NOT NULL
+                """,
+                (server_id,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+        wanted = {t.strip().lower() for t in tags}
+        matches = []
+        for jf_id, raw in rows:
+            if not jf_id or jf_id in exclude_ids:
+                continue
+            scores = parse_feature_string(raw)
+            if any(v >= min_score for k, v in scores.items() if k.strip().lower() in wanted):
+                matches.append(jf_id)
+        return matches
 
     def pick_target(
         self, target_mood: dict[str, float], exclude_ids: set[str], exploration: str = "medium"
@@ -651,19 +693,28 @@ class Dj:
         }
 
     def _pick_preferred(self, daypart: dict[str, Any], exclude: set[str]) -> dict[str, Any] | None:
-        """A daypart can name specific `artists` and/or `genres` it wants
-        (e.g. a themed hour) instead of, or alongside, a mood target. Pulled
-        straight from Jellyfin rather than the mood catalogue -- there's no
-        need for AudioMuse-AI's data just to say "play some Dua Lipa"."""
+        """A daypart can name specific `artists`, Jellyfin `genres`, and/or
+        AudioMuse-AI classifier `tags` it wants (e.g. a themed hour) instead
+        of, or alongside, a mood target. `artists`/`genres` are pulled
+        straight from Jellyfin; `tags` go through AudioMuse-AI's own
+        genre/vocal-type classifier (see Catalogue.tag_pool) -- that's how a
+        themed hour can mean "this vibe, whoever's actually in the library"
+        rather than a fixed, hand-picked artist list."""
         artists = daypart.get("artists") or []
         genres = daypart.get("genres") or []
-        if not artists and not genres:
+        tags = daypart.get("tags") or []
+        if not artists and not genres and not tags:
             return None
         pool: list[dict[str, Any]] = []
         for artist in artists:
             pool.extend(self.jf.tracks_by_artist(artist))
         for genre in genres:
             pool.extend(self.jf.tracks_by_genre(genre))
+        if tags:
+            ids = self.catalogue.tag_pool(tags, exclude)
+            if len(ids) > 150:
+                ids = random.sample(ids, 150)
+            pool.extend(self.jf.items_by_ids(ids))
         pool = [item for item in pool if item.get("Id") not in exclude]
         if not pool:
             return None

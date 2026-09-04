@@ -227,17 +227,66 @@ def test_catalogue_pick_target_excludes_recent_tracks():
 
 
 class FakePreferenceJellyfin:
-    """Fake covering the artist/genre lookups _pick_preferred uses."""
+    """Fake covering the artist/genre/tag lookups _pick_preferred uses."""
 
-    def __init__(self, by_artist=None, by_genre=None):
+    def __init__(self, by_artist=None, by_genre=None, by_ids=None):
         self.by_artist = by_artist or {}
         self.by_genre = by_genre or {}
+        self.by_ids = by_ids or {}
 
     def tracks_by_artist(self, name):
         return self.by_artist.get(name, [])
 
     def tracks_by_genre(self, genre):
         return self.by_genre.get(genre, [])
+
+    def items_by_ids(self, ids):
+        return [self.by_ids[i] for i in ids if i in self.by_ids]
+
+
+class FakePgCursor:
+    def __init__(self, server_id, rows):
+        self.server_id = server_id
+        self.rows = rows
+        self._mode = None
+
+    def execute(self, query, params=None):
+        self._mode = "server_id" if "music_servers" in query else "rows"
+
+    def fetchone(self):
+        return (self.server_id,)
+
+    def fetchall(self):
+        return self.rows
+
+
+class FakePgConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self):
+        return self._cursor
+
+    def close(self):
+        pass
+
+
+def test_catalogue_tag_pool_filters_by_label_and_threshold(monkeypatch):
+    rows = [
+        ("a", "female vocalists:0.55,pop:0.5"),
+        ("b", "hip-hop:0.6,electronic:0.4"),
+        ("c", "female vocalists:0.1"),
+    ]
+    monkeypatch.setattr("dj.dj.pg_connect", lambda cfg: FakePgConn(FakePgCursor("srv1", rows)))
+    cat = Catalogue(config())
+    assert cat.tag_pool(["female vocalists"], exclude_ids=set(), min_score=0.3) == ["a"]
+
+
+def test_catalogue_tag_pool_excludes_given_ids(monkeypatch):
+    rows = [("a", "female vocalists:0.55")]
+    monkeypatch.setattr("dj.dj.pg_connect", lambda cfg: FakePgConn(FakePgCursor("srv1", rows)))
+    cat = Catalogue(config())
+    assert cat.tag_pool(["female vocalists"], exclude_ids={"a"}) == []
 
 
 def make_dj(tmp_path, schedule):
@@ -269,3 +318,22 @@ def test_pick_preferred_falls_back_to_none_when_pool_empty(tmp_path):
     dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
     dj.jf = FakePreferenceJellyfin()
     assert dj._pick_preferred({"artists": ["Nobody Here"], "genres": ["Nonexistent"]}, exclude=set()) is None
+
+
+def test_pick_preferred_pulls_from_tags_via_the_audiomuse_classifier(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin(by_ids={"5": {"Id": "5", "Name": "Tagged Track"}})
+    monkeypatch.setattr(dj.catalogue, "tag_pool", lambda tags, exclude, min_score=0.3: ["5"])
+    picked = dj._pick_preferred({"tags": ["female vocalists"]}, exclude=set())
+    assert picked["item_id"] == "5"
+
+
+def test_pick_preferred_combines_artists_and_tags(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin(
+        by_artist={"A": [{"Id": "1", "Name": "By artist"}]},
+        by_ids={"2": {"Id": "2", "Name": "By tag"}},
+    )
+    monkeypatch.setattr(dj.catalogue, "tag_pool", lambda tags, exclude, min_score=0.3: ["2"])
+    ids = {dj._pick_preferred({"artists": ["A"], "tags": ["female vocalists"]}, exclude=set())["item_id"] for _ in range(20)}
+    assert ids == {"1", "2"}
