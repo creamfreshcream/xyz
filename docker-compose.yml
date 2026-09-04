@@ -11,6 +11,9 @@ services:
       - .env
     environment:
       LIQUIDSOAP_HOST: liquidsoap
+      # Without this the container defaults to UTC, so dj/schedule.json's
+      # hour ranges (meant as local time) fire 1-2h late depending on DST.
+      TZ: Europe/Berlin
     volumes:
       - ./dj/schedule.json:/dj/schedule.json:ro
       - dj_state:/state
