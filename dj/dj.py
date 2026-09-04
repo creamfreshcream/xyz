@@ -40,7 +40,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -472,9 +472,14 @@ class DjState:
         try:
             with open(path, encoding="utf-8") as f:
                 raw = json.load(f)
-            return cls(**{k: raw.get(k, getattr(cls, k, None)) for k in cls.__dataclass_fields__})
         except (FileNotFoundError, json.JSONDecodeError):
             return cls()
+        # Only pass through keys the saved file actually has and let the
+        # dataclass's own field defaults (default_factory included) apply to
+        # anything missing -- a state file from before a field was added
+        # must not silently override it with None.
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in raw.items() if k in known})
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
