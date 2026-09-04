@@ -3,11 +3,14 @@ from datetime import datetime
 
 import pytest
 
+import struct as struct_mod
+
 from dj.dj import (
     Catalogue,
     Config,
     Dj,
     DjState,
+    SongMap,
     _escape,
     annotate_uri,
     build_bridge,
@@ -373,20 +376,29 @@ def history_entry(item_id):
     return {"item_id": item_id, "artist": "A", "title": "T", "at": datetime.now(timezone.utc).isoformat()}
 
 
-def test_djstate_like_marks_liked_and_clears_ban():
+def test_djstate_like_marks_liked_and_clears_penalty():
     state = DjState()
-    state.ban("1")
+    state.penalize("1")
     state.like("1")
     assert state.liked_track_ids == ["1"]
-    assert state.banned_track_ids == []
+    assert state.active_penalty_ids() == set()
 
 
-def test_djstate_ban_marks_banned_and_clears_like():
+def test_djstate_penalize_bans_and_clears_like():
     state = DjState()
     state.like("1")
-    state.ban("1")
-    assert state.banned_track_ids == ["1"]
+    state.penalize("1")
+    assert state.active_penalty_ids() == {"1"}
     assert state.liked_track_ids == []
+
+
+def test_djstate_penalize_escalates_on_repeat_offenses():
+    state = DjState()
+    state.penalize("1")
+    first_until = state.penalties["1"]["until"]
+    state.penalize("1")
+    assert state.penalties["1"]["strikes"] == 2
+    assert state.penalties["1"]["until"] > first_until
 
 
 def test_djstate_like_and_ban_are_idempotent():
@@ -422,7 +434,7 @@ def test_record_feedback_down_bans_the_current_track(tmp_path, monkeypatch):
     monkeypatch.setattr("dj.dj.telnet_command", lambda host, port, cmd: skipped.append(cmd) or "Done.")
     result = dj.record_feedback({"vote": "down"})
     assert result == {"item_id": "42", "vote": "down"}
-    assert dj.state.banned_track_ids == ["42"]
+    assert dj.state.active_penalty_ids() == {"42"}
     assert skipped == ["dj_queue.skip"]
 
 
@@ -433,7 +445,7 @@ def test_record_feedback_down_on_a_non_current_track_does_not_skip(tmp_path, mon
     skipped = []
     monkeypatch.setattr("dj.dj.telnet_command", lambda host, port, cmd: skipped.append(cmd) or "Done.")
     dj.record_feedback({"vote": "down", "item_id": "99"})
-    assert dj.state.banned_track_ids == ["99"]
+    assert dj.state.active_penalty_ids() == {"99"}
     assert skipped == []
 
 
@@ -500,3 +512,59 @@ def test_sync_playlist_caps_track_count(tmp_path):
     dj.state.history = [history_entry(str(i)) for i in range(5)]
     dj._sync_playlist()
     assert dj.jf.created[0][1] == ["3", "4"]
+
+
+class FakeMapPgCursor:
+    def __init__(self, proj_blob, id_map_json, server_id, fp_rows):
+        self.proj_blob = proj_blob
+        self.id_map_json = id_map_json
+        self.server_id = server_id
+        self.fp_rows = fp_rows
+        self._mode = None
+
+    def execute(self, query, params=None):
+        if "map_projection_data" in query:
+            self._mode = "map"
+        elif "music_servers" in query:
+            self._mode = "server"
+        elif "track_server_map" in query:
+            self._mode = "fp"
+
+    def fetchone(self):
+        if self._mode == "map":
+            return (self.proj_blob, self.id_map_json)
+        if self._mode == "server":
+            return (self.server_id,)
+        return None
+
+    def fetchall(self):
+        return self.fp_rows
+
+
+def make_song_map(monkeypatch, points, fp_ids, fp_rows):
+    blob = struct_mod.pack(f"<{len(points) * 2}f", *[v for p in points for v in p])
+    cursor = FakeMapPgCursor(blob, json.dumps(fp_ids), "srv1", fp_rows)
+    monkeypatch.setattr("dj.dj.pg_connect", lambda cfg: FakePgConn(cursor))
+    return SongMap(config())
+
+
+def test_song_map_position_looks_up_by_jellyfin_id(monkeypatch):
+    sm = make_song_map(
+        monkeypatch,
+        points=[(0.0, 0.0), (1.0, 1.0), (0.5, -0.5)],
+        fp_ids=["fp1", "fp2", "fp3"],
+        fp_rows=[("fp2", "jf-b")],
+    )
+    pos = sm.position("jf-b")
+    assert pos["x"] == 1.0 and pos["y"] == 1.0
+    assert pos["bounds"] == {"xmin": 0.0, "xmax": 1.0, "ymin": -0.5, "ymax": 1.0}
+
+
+def test_song_map_position_returns_none_for_an_unmapped_track(monkeypatch):
+    sm = make_song_map(
+        monkeypatch,
+        points=[(0.0, 0.0)],
+        fp_ids=["fp1"],
+        fp_rows=[("fp1", "jf-a")],
+    )
+    assert sm.position("nope") is None

@@ -194,6 +194,32 @@
   .history li { padding: 4px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .history:empty, .history[hidden] { display: none; }
 
+  .songmap { margin-top: 18px; }
+  .songmap .label { font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); }
+  .songmap[hidden] { display: none; }
+
+  .songmap-frame {
+    position: relative;
+    margin-top: 10px;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #05070a;
+    aspect-ratio: 900 / 680;
+  }
+
+  .songmap-bg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  .songmap-dot {
+    position: absolute;
+    width: 9px;
+    height: 9px;
+    margin: -4.5px 0 0 -4.5px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 4px var(--accent-soft), 0 0 10px 2px rgba(242, 98, 75, 0.7);
+    transition: left 0.6s ease, top 0.6s ease;
+  }
+
   a { color: inherit; }
 </style>
 </head>
@@ -240,12 +266,21 @@
 
   <div class="meta">
     <span id="listeners">— listeners</span>
+    <span id="likes-today" hidden></span>
     <span id="quality"></span>
   </div>
 
   <div class="history" id="history" hidden>
     <div class="label">Recently played</div>
     <ol id="history-list"></ol>
+  </div>
+
+  <div class="songmap" id="songmap" hidden>
+    <div class="label">On the sonic map</div>
+    <div class="songmap-frame">
+      <img src="/song_map.png" alt="" class="songmap-bg">
+      <div class="songmap-dot" id="songmap-dot"></div>
+    </div>
   </div>
 </main>
 
@@ -459,6 +494,25 @@
       const response = await fetch(credentiallessUrl(DJ_STATUS_URL), { cache: "no-store" });
       if (!response.ok) return;
       const status = await response.json();
+
+      const likesEl = el("likes-today");
+      const likes = Number(status.likes_today || 0);
+      likesEl.hidden = likes === 0;
+      likesEl.textContent = `♥ ${likes} today`;
+
+      const songmap = el("songmap");
+      const pos = status.map_position;
+      if (pos && pos.bounds) {
+        const { x, y, bounds } = pos;
+        const px = ((x - bounds.xmin) / (bounds.xmax - bounds.xmin)) * 100;
+        const py = (1 - (y - bounds.ymin) / (bounds.ymax - bounds.ymin)) * 100;
+        el("songmap-dot").style.left = `${px}%`;
+        el("songmap-dot").style.top = `${py}%`;
+        songmap.hidden = false;
+      } else {
+        songmap.hidden = true;
+      }
+
       const target = status && status.target;
       const dj = el("drift");
       if (!target || !target.title) {

@@ -25,6 +25,63 @@
       "mood": {"party": 0.9, "danceable": 0.9, "aggressive": 0.4, "happy": 0.5},
       "exploration": "medium"
     },
+    {
+      "_comment": "Daily 16:00-17:00 theme hour, a different one each weekday -- picked from AudioMuse-AI's genre/vocal-type classifier tags (see the top-level comment), sized by how many tracks in the library actually carry each tag as of 2026-09-04: Hip-Hop 1917, jazz 1811, metal+heavy metal 2335, punk 728, 80s 382, House 516, ambient+chillout 5191.",
+      "name": "theme_hour_monday_hiphop",
+      "days": [0],
+      "hours": [16, 17],
+      "tags": ["Hip-Hop"],
+      "mood": {"party": 0.6, "danceable": 0.6, "aggressive": 0.4},
+      "exploration": "low"
+    },
+    {
+      "name": "theme_hour_tuesday_jazz",
+      "days": [1],
+      "hours": [16, 17],
+      "tags": ["jazz"],
+      "mood": {"relaxed": 0.6, "happy": 0.4},
+      "exploration": "low"
+    },
+    {
+      "name": "theme_hour_wednesday_metal",
+      "days": [2],
+      "hours": [16, 17],
+      "tags": ["metal", "heavy metal"],
+      "mood": {"aggressive": 0.8, "party": 0.5},
+      "exploration": "low"
+    },
+    {
+      "name": "theme_hour_thursday_punk",
+      "days": [3],
+      "hours": [16, 17],
+      "tags": ["punk"],
+      "mood": {"aggressive": 0.7, "party": 0.6},
+      "exploration": "low"
+    },
+    {
+      "name": "theme_hour_friday_80s",
+      "days": [4],
+      "hours": [16, 17],
+      "tags": ["80s"],
+      "mood": {"happy": 0.6, "danceable": 0.5, "party": 0.5},
+      "exploration": "low"
+    },
+    {
+      "name": "theme_hour_saturday_house",
+      "days": [5],
+      "hours": [16, 17],
+      "tags": ["House"],
+      "mood": {"danceable": 0.8, "party": 0.7},
+      "exploration": "low"
+    },
+    {
+      "name": "theme_hour_sunday_ambient",
+      "days": [6],
+      "hours": [16, 17],
+      "tags": ["ambient", "chillout"],
+      "mood": {"relaxed": 0.8, "sad": 0.2},
+      "exploration": "low"
+    },
     {"name": "morning", "hours": [6, 10], "mood": {"relaxed": 0.7, "happy": 0.5, "aggressive": 0.15, "danceable": 0.25}},
     {"name": "midday", "hours": [10, 14], "mood": {"danceable": 0.5, "party": 0.4, "happy": 0.55, "relaxed": 0.35}},
     {"name": "afternoon", "hours": [14, 18], "mood": {"party": 0.55, "aggressive": 0.45, "danceable": 0.6, "happy": 0.4}},

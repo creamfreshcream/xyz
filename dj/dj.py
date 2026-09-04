@@ -35,6 +35,7 @@ import math
 import os
 import random
 import socket
+import struct
 import threading
 import time
 import urllib.error
@@ -450,6 +451,78 @@ class Catalogue:
         return random.choice(pool)
 
 
+class SongMap:
+    """Cached view of AudioMuse-AI's 2D sonic map projection -- lets the web
+    player show "you are here" against the pre-rendered static image of the
+    whole map (song_map.png). Reloaded rarely: the projection only changes
+    when AudioMuse-AI recomputes it, not on every track."""
+
+    REFRESH_SECONDS = 3600
+
+    def __init__(self, cfg: Config, index_name: str = "main_map") -> None:
+        self.cfg = cfg
+        self.index_name = index_name
+        self._positions: dict[str, tuple[float, float]] = {}
+        self._bounds: dict[str, float] | None = None
+        self._loaded_at: float = 0.0
+
+    def refresh(self) -> None:
+        conn = pg_connect(self.cfg)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT projection_data, id_map_json FROM map_projection_data WHERE index_name = %s",
+                (self.index_name,),
+            )
+            row = cur.fetchone()
+            if not row:
+                self._loaded_at = time.time()
+                return
+            proj_blob, id_map_json = row
+            id_map = json.loads(id_map_json)
+            floats = struct.unpack(f"<{len(proj_blob) // 4}f", proj_blob)
+
+            cur.execute("SELECT server_id FROM music_servers WHERE server_type = 'jellyfin' LIMIT 1")
+            srv_row = cur.fetchone()
+            fp_to_jf: dict[str, str] = {}
+            if srv_row:
+                cur.execute(
+                    "SELECT item_id, provider_track_id FROM track_server_map WHERE server_id = %s",
+                    (srv_row[0],),
+                )
+                fp_to_jf = dict(cur.fetchall())
+        finally:
+            conn.close()
+
+        positions: dict[str, tuple[float, float]] = {}
+        xs: list[float] = []
+        ys: list[float] = []
+        for i, fp_id in enumerate(id_map):
+            x, y = floats[2 * i], floats[2 * i + 1]
+            xs.append(x)
+            ys.append(y)
+            jf_id = fp_to_jf.get(fp_id)
+            if jf_id:
+                positions[jf_id] = (x, y)
+
+        self._positions = positions
+        if xs and ys:
+            self._bounds = {"xmin": min(xs), "xmax": max(xs), "ymin": min(ys), "ymax": max(ys)}
+        self._loaded_at = time.time()
+        log.info("Song map refreshed: %d positions", len(positions))
+
+    def position(self, item_id: str) -> dict[str, Any] | None:
+        if time.time() - self._loaded_at > self.REFRESH_SECONDS:
+            try:
+                self.refresh()
+            except Exception:
+                log.exception("Song map refresh failed")
+        point = self._positions.get(item_id)
+        if not point or not self._bounds:
+            return None
+        return {"x": point[0], "y": point[1], "bounds": self._bounds}
+
+
 # --------------------------------------------------------------------- state
 
 @dataclass
@@ -465,7 +538,8 @@ class DjState:
     synced_playlist_id: str | None = None
     last_playlist_sync: str | None = None
     liked_track_ids: list[str] = field(default_factory=list)
-    banned_track_ids: list[str] = field(default_factory=list)
+    penalties: dict[str, dict[str, Any]] = field(default_factory=dict)  # item_id -> {strikes, until}
+    like_events: list[str] = field(default_factory=list)  # UTC timestamps, one per up-vote action
 
     @classmethod
     def load(cls, path: str) -> "DjState":
@@ -517,14 +591,41 @@ class DjState:
     def like(self, item_id: str) -> None:
         if item_id not in self.liked_track_ids:
             self.liked_track_ids.append(item_id)
-        if item_id in self.banned_track_ids:
-            self.banned_track_ids.remove(item_id)
+        self.penalties.pop(item_id, None)
 
-    def ban(self, item_id: str) -> None:
-        if item_id not in self.banned_track_ids:
-            self.banned_track_ids.append(item_id)
+    def penalize(self, item_id: str) -> None:
+        # Escalating temporary ban rather than a permanent one: 1st downvote
+        # -> 14 days out, 2nd -> 28, and so on. A later like() clears it.
+        strikes = self.penalties.get(item_id, {}).get("strikes", 0) + 1
+        until = datetime.now(timezone.utc) + timedelta(days=14 * strikes)
+        self.penalties[item_id] = {"strikes": strikes, "until": until.isoformat()}
         if item_id in self.liked_track_ids:
             self.liked_track_ids.remove(item_id)
+
+    def active_penalty_ids(self) -> set[str]:
+        now = datetime.now(timezone.utc)
+        return {
+            item_id
+            for item_id, entry in self.penalties.items()
+            if datetime.fromisoformat(entry["until"]) > now
+        }
+
+    def record_like_event(self) -> None:
+        self.like_events.append(datetime.now(timezone.utc).isoformat())
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+        self.like_events = [t for t in self.like_events if datetime.fromisoformat(t) > cutoff]
+
+    def likes_today(self) -> int:
+        today = datetime.now().date()
+        count = 0
+        for ts in self.like_events:
+            try:
+                local = datetime.fromisoformat(ts).astimezone()
+            except ValueError:
+                continue
+            if local.date() == today:
+                count += 1
+        return count
 
     def recent_artists(self, minutes: float) -> set[str]:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
@@ -708,6 +809,7 @@ class Dj:
         self.cfg = cfg
         self.jf = Jellyfin(cfg)
         self.catalogue = Catalogue(cfg)
+        self.song_map = SongMap(cfg)
         self.schedule = load_schedule(cfg.schedule_file)
         self.state = DjState.load(cfg.state_file)
         # RLock, not Lock: run()'s main loop holds this for the whole tick,
@@ -724,6 +826,8 @@ class Dj:
                 "last_track": self.state.history[-1] if self.state.history else None,
                 "since": self.state.last_pushed_at,
                 "queued_ahead": len(self.state.plan),
+                "likes_today": self.state.likes_today(),
+                "map_position": self.song_map.position(self.state.last_item_id) if self.state.last_item_id else None,
             }
 
     def set_manual_target(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -757,8 +861,9 @@ class Dj:
             is_current = item_id == self.state.last_item_id
             if vote == "up":
                 self.state.like(item_id)
+                self.state.record_like_event()
             else:
-                self.state.ban(item_id)
+                self.state.penalize(item_id)
             self.state.save(self.cfg.state_file)
 
         if vote == "up":
@@ -786,7 +891,7 @@ class Dj:
 
         daypart = current_daypart(self.schedule)
         self.state.daypart = daypart["name"]
-        exclude = self.state.recent_track_ids(self.cfg.recent_track_window_hours) | set(self.state.banned_track_ids)
+        exclude = self.state.recent_track_ids(self.cfg.recent_track_window_hours) | self.state.active_penalty_ids()
 
         preferred = self._pick_preferred(daypart, exclude)
         if preferred:
@@ -848,7 +953,7 @@ class Dj:
             bridge = [target]
         exclude = (
             self.state.recent_track_ids(self.cfg.recent_track_window_hours)
-            | set(self.state.banned_track_ids)
+            | self.state.active_penalty_ids()
             | {target["item_id"]}
         )
         dwell = build_dwell(self.jf, target["item_id"], self.cfg.dwell_tracks, exclude)
