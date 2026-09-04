@@ -141,6 +141,27 @@
 
   .volume { flex: 1; display: flex; align-items: center; gap: 10px; color: var(--muted); }
 
+  .vote { flex: none; display: flex; gap: 6px; }
+
+  .vote-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+  }
+
+  .vote-btn svg { fill: currentColor; }
+  .vote-btn:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
+  .vote-btn:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+  .vote-btn:disabled { opacity: 0.35; cursor: default; }
+  .vote-btn.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+
   input[type="range"] {
     flex: 1;
     accent-color: var(--accent);
@@ -202,6 +223,18 @@
         <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z"/>
       </svg>
       <input type="range" id="volume" min="0" max="100" value="80" aria-label="Volume">
+    </div>
+    <div class="vote">
+      <button class="vote-btn" id="vote-up" type="button" aria-label="Like this track" title="Gefällt mir" disabled>
+        <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+          <path d="M2 21h2a1 1 0 0 0 1-1v-9a1 1 0 0 0-1-1H2v11zM22 11.5a2 2 0 0 0-2-2h-5.7l.86-4.14.03-.32c0-.4-.16-.77-.42-1.03L14.17 3 7.6 9.57C7.22 9.94 7 10.46 7 11v8a2 2 0 0 0 2 2h8.5c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.1-.24.14-.5.14-.77v-1.4l-.01-.01L22 11.5z"/>
+        </svg>
+      </button>
+      <button class="vote-btn" id="vote-down" type="button" aria-label="Dislike this track" title="Gefällt mir nicht" disabled>
+        <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+          <path d="M22 3h-2a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h2V3zM2 12.5a2 2 0 0 0 2 2h5.7l-.86 4.14-.03.32c0 .4.16.77.42 1.03L9.83 21l6.57-6.57c.38-.37.6-.89.6-1.43V5a2 2 0 0 0-2-2H6.5c-.83 0-1.54.5-1.84 1.22L1.64 11.27c-.1.24-.14.5-.14.77v1.4l.01.01L2 12.5z"/>
+        </svg>
+      </button>
     </div>
   </div>
 
@@ -328,6 +361,7 @@
     if (!track || track === lastTrack) return;
     if (lastTrack) history.unshift(lastTrack);
     lastTrack = track;
+    resetVoteButtons();
     history.splice(HISTORY_LENGTH);
     el("history").hidden = history.length === 0;
     el("history-list").replaceChildren(
@@ -347,7 +381,41 @@
     el("listeners").textContent = "— listeners";
     el("quality").textContent = "";
     el("drift").hidden = true;
+    el("vote-up").disabled = true;
+    el("vote-down").disabled = true;
   }
+
+  function resetVoteButtons() {
+    el("vote-up").disabled = false;
+    el("vote-down").disabled = false;
+    el("vote-up").classList.remove("active");
+    el("vote-down").classList.remove("active");
+  }
+
+  async function vote(direction) {
+    const upBtn = el("vote-up");
+    const downBtn = el("vote-down");
+    upBtn.disabled = true;
+    downBtn.disabled = true;
+    try {
+      const response = await fetch(credentiallessUrl("/dj/feedback"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ vote: direction }),
+      });
+      if (!response.ok) throw new Error(`feedback returned ${response.status}`);
+      upBtn.classList.toggle("active", direction === "up");
+      downBtn.classList.toggle("active", direction === "down");
+    } catch (err) {
+      console.error("radio: vote failed", err);
+    } finally {
+      upBtn.disabled = false;
+      downBtn.disabled = false;
+    }
+  }
+
+  el("vote-up").addEventListener("click", () => vote("up"));
+  el("vote-down").addEventListener("click", () => vote("down"));
 
   async function poll() {
     try {

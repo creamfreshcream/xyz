@@ -362,6 +362,85 @@ def history_entry(item_id):
     return {"item_id": item_id, "artist": "A", "title": "T", "at": datetime.now(timezone.utc).isoformat()}
 
 
+def test_djstate_like_marks_liked_and_clears_ban():
+    state = DjState()
+    state.ban("1")
+    state.like("1")
+    assert state.liked_track_ids == ["1"]
+    assert state.banned_track_ids == []
+
+
+def test_djstate_ban_marks_banned_and_clears_like():
+    state = DjState()
+    state.like("1")
+    state.ban("1")
+    assert state.banned_track_ids == ["1"]
+    assert state.liked_track_ids == []
+
+
+def test_djstate_like_and_ban_are_idempotent():
+    state = DjState()
+    state.like("1")
+    state.like("1")
+    assert state.liked_track_ids == ["1"]
+
+
+class FakeFeedbackJellyfin:
+    def __init__(self):
+        self.favorited = []
+
+    def set_favorite(self, item_id, favorite=True):
+        self.favorited.append((item_id, favorite))
+
+
+def test_record_feedback_up_favorites_and_likes(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakeFeedbackJellyfin()
+    dj.state.last_item_id = "42"
+    result = dj.record_feedback({"vote": "up"})
+    assert result == {"item_id": "42", "vote": "up"}
+    assert dj.state.liked_track_ids == ["42"]
+    assert dj.jf.favorited == [("42", True)]
+
+
+def test_record_feedback_down_bans_the_current_track(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakeFeedbackJellyfin()
+    dj.state.last_item_id = "42"
+    skipped = []
+    monkeypatch.setattr("dj.dj.telnet_command", lambda host, port, cmd: skipped.append(cmd) or "Done.")
+    result = dj.record_feedback({"vote": "down"})
+    assert result == {"item_id": "42", "vote": "down"}
+    assert dj.state.banned_track_ids == ["42"]
+    assert skipped == ["dj_queue.skip"]
+
+
+def test_record_feedback_down_on_a_non_current_track_does_not_skip(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakeFeedbackJellyfin()
+    dj.state.last_item_id = "42"
+    skipped = []
+    monkeypatch.setattr("dj.dj.telnet_command", lambda host, port, cmd: skipped.append(cmd) or "Done.")
+    dj.record_feedback({"vote": "down", "item_id": "99"})
+    assert dj.state.banned_track_ids == ["99"]
+    assert skipped == []
+
+
+def test_record_feedback_requires_a_current_track(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakeFeedbackJellyfin()
+    with pytest.raises(ValueError):
+        dj.record_feedback({"vote": "up"})
+
+
+def test_record_feedback_rejects_unknown_vote(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakeFeedbackJellyfin()
+    dj.state.last_item_id = "1"
+    with pytest.raises(ValueError):
+        dj.record_feedback({"vote": "sideways"})
+
+
 def test_sync_playlist_does_nothing_without_history(tmp_path):
     dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
     dj.jf = FakePlaylistJellyfin()

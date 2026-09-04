@@ -187,6 +187,15 @@ class Jellyfin:
         with urllib.request.urlopen(request, timeout=timeout):
             pass
 
+    def set_favorite(self, item_id: str, favorite: bool = True, timeout: float = 30.0) -> None:
+        query = urllib.parse.urlencode({"api_key": self.cfg.api_key})
+        url = f"{self.cfg.jellyfin_url}/Users/{self.cfg.user_id}/FavoriteItems/{item_id}?{query}"
+        request = urllib.request.Request(
+            url, method="POST" if favorite else "DELETE", headers={"User-Agent": USER_AGENT}
+        )
+        with urllib.request.urlopen(request, timeout=timeout):
+            pass
+
     def create_playlist(self, name: str, item_ids: list[str]) -> str | None:
         if not item_ids:
             return None
@@ -455,6 +464,8 @@ class DjState:
     manual_target: dict[str, Any] | None = None
     synced_playlist_id: str | None = None
     last_playlist_sync: str | None = None
+    liked_track_ids: list[str] = field(default_factory=list)
+    banned_track_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: str) -> "DjState":
@@ -490,6 +501,18 @@ class DjState:
     def recent_track_ids(self, hours: float) -> set[str]:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         return {h["item_id"] for h in self.history if datetime.fromisoformat(h["at"]) > cutoff}
+
+    def like(self, item_id: str) -> None:
+        if item_id not in self.liked_track_ids:
+            self.liked_track_ids.append(item_id)
+        if item_id in self.banned_track_ids:
+            self.banned_track_ids.remove(item_id)
+
+    def ban(self, item_id: str) -> None:
+        if item_id not in self.banned_track_ids:
+            self.banned_track_ids.append(item_id)
+        if item_id in self.liked_track_ids:
+            self.liked_track_ids.remove(item_id)
 
     def recent_artists(self, minutes: float) -> set[str]:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
@@ -637,7 +660,8 @@ class StatusHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib method name
-        if self.path.rstrip("/") != "/target":
+        path = self.path.rstrip("/")
+        if path not in ("/target", "/feedback"):
             self._json(404, {"error": "not found"})
             return
         length = int(self.headers.get("Content-Length", "0"))
@@ -647,11 +671,14 @@ class StatusHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": "invalid JSON"})
             return
         try:
-            resolved = self.dj.set_manual_target(body)
+            if path == "/target":
+                resolved = self.dj.set_manual_target(body)
+                self._json(202, {"accepted": resolved})
+            else:
+                result = self.dj.record_feedback(body)
+                self._json(200, result)
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
-            return
-        self._json(202, {"accepted": resolved})
 
 
 def serve_status(dj: "Dj", port: int) -> None:
@@ -707,6 +734,37 @@ class Dj:
         log.info("Manual target set: %s - %s", resolved["author"], resolved["title"])
         return resolved
 
+    def record_feedback(self, body: dict[str, Any]) -> dict[str, Any]:
+        vote = body.get("vote")
+        if vote not in ("up", "down"):
+            raise ValueError("'vote' must be 'up' or 'down'")
+        with self._lock:
+            item_id = body.get("item_id") or self.state.last_item_id
+            if not item_id:
+                raise ValueError("No current track to vote on")
+            is_current = item_id == self.state.last_item_id
+            if vote == "up":
+                self.state.like(item_id)
+            else:
+                self.state.ban(item_id)
+            self.state.save(self.cfg.state_file)
+
+        if vote == "up":
+            try:
+                self.jf.set_favorite(item_id, True)
+            except (urllib.error.URLError, OSError) as exc:
+                log.warning("Feedback: could not favorite %s (%s)", item_id, exc)
+        elif is_current:
+            # Thumbs-down on whatever's currently on air -- skip it right
+            # away rather than making the listener sit through it anyway.
+            try:
+                telnet_command(self.cfg.liquidsoap_host, self.cfg.liquidsoap_port, f"{self.cfg.queue_id}.skip")
+            except (OSError, LiquidsoapError) as exc:
+                log.warning("Feedback: could not skip after downvote (%s)", exc)
+
+        log.info("Feedback: %s for %s", vote, item_id)
+        return {"item_id": item_id, "vote": vote}
+
     def _next_target(self) -> dict[str, Any]:
         with self._lock:
             manual = self.state.manual_target
@@ -716,7 +774,7 @@ class Dj:
 
         daypart = current_daypart(self.schedule)
         self.state.daypart = daypart["name"]
-        exclude = self.state.recent_track_ids(self.cfg.recent_track_window_hours)
+        exclude = self.state.recent_track_ids(self.cfg.recent_track_window_hours) | set(self.state.banned_track_ids)
 
         preferred = self._pick_preferred(daypart, exclude)
         if preferred:
@@ -776,7 +834,11 @@ class Dj:
         bridge = build_bridge(self.jf, self.state.last_item_id, target["item_id"], self.cfg.bridge_max_tracks)
         if not bridge:
             bridge = [target]
-        exclude = self.state.recent_track_ids(self.cfg.recent_track_window_hours) | {target["item_id"]}
+        exclude = (
+            self.state.recent_track_ids(self.cfg.recent_track_window_hours)
+            | set(self.state.banned_track_ids)
+            | {target["item_id"]}
+        )
         dwell = build_dwell(self.jf, target["item_id"], self.cfg.dwell_tracks, exclude)
 
         self.state.plan = bridge + dwell
