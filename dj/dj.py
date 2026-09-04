@@ -164,6 +164,40 @@ class Jellyfin:
         items = data.get("Items", [])
         return items[0] if items else None
 
+    def tracks_by_artist(self, name: str, limit: int = 50) -> list[dict[str, Any]]:
+        # SearchTerm is fuzzy (title matches too), so only keep results whose
+        # Artists field is an exact case-insensitive match for `name` --
+        # avoids e.g. "Poppy" pulling in an unrelated track just titled Poppy.
+        data = self.get(
+            "/Items",
+            {
+                "SearchTerm": name,
+                "IncludeItemTypes": "Audio",
+                "Recursive": "true",
+                "Fields": "Artists",
+                "Limit": limit,
+            },
+        )
+        needle = name.strip().lower()
+        return [
+            item
+            for item in data.get("Items", [])
+            if any(needle == a.strip().lower() for a in (item.get("Artists") or []))
+        ]
+
+    def tracks_by_genre(self, genre: str, limit: int = 200) -> list[dict[str, Any]]:
+        data = self.get(
+            "/Items",
+            {
+                "Genres": genre,
+                "IncludeItemTypes": "Audio",
+                "Recursive": "true",
+                "Fields": "Artists",
+                "Limit": limit,
+            },
+        )
+        return data.get("Items", [])
+
     def item(self, item_id: str) -> dict[str, Any] | None:
         data = self.get(
             "/Items", {"Ids": item_id, "Fields": "Artists,Album", "Recursive": "true"}
@@ -383,14 +417,31 @@ def load_schedule(path: str) -> list[dict[str, Any]]:
 
 
 def current_daypart(schedule: list[dict[str, Any]], now: datetime | None = None) -> dict[str, Any]:
-    hour = (now or datetime.now()).hour
+    now = now or datetime.now()
+    hour = now.hour
+    # Monday=0 .. Sunday=6, matching Python's own datetime.weekday().
+    weekday = now.weekday()
+    prev_weekday = (weekday - 1) % 7
+
+    def day_ok(days: list[int] | None, d: int) -> bool:
+        return days is None or d in days
+
     for daypart in schedule:
+        days = daypart.get("days")
         start, end = daypart["hours"]
         if start <= end:
-            if start <= hour < end:
+            if day_ok(days, weekday) and start <= hour < end:
                 return daypart
-        else:  # wraps past midnight, e.g. [23, 6]
-            if hour >= start or hour < end:
+        else:
+            # Wraps past midnight, e.g. Fri/Sat 20:00-02:00 -- the evening
+            # part belongs to `weekday`, but the early-morning tail belongs
+            # to whichever day's evening started it, i.e. `prev_weekday`.
+            # Without this split, "Friday 01:00" (prev_weekday=Thursday,
+            # not in a Fri/Sat rule) would wrongly inherit Saturday's window
+            # a full day early.
+            evening = day_ok(days, weekday) and hour >= start
+            morning = day_ok(days, prev_weekday) and hour < end
+            if evening or morning:
                 return daypart
     return schedule[0]
 
@@ -577,8 +628,13 @@ class Dj:
 
         daypart = current_daypart(self.schedule)
         self.state.daypart = daypart["name"]
-        self.catalogue.refresh()
         exclude = self.state.recent_track_ids(self.cfg.recent_track_window_hours)
+
+        preferred = self._pick_preferred(daypart, exclude)
+        if preferred:
+            return preferred
+
+        self.catalogue.refresh()
         exploration = daypart.get("exploration", "medium")
         candidate = self.catalogue.pick_target(daypart["mood"], exclude, exploration)
         if not candidate:
@@ -588,6 +644,30 @@ class Dj:
             "item_id": candidate["item_id"],
             "title": item.get("Name") if item else None,
             "author": ", ".join(item.get("Artists") or []) if item else None,
+        }
+
+    def _pick_preferred(self, daypart: dict[str, Any], exclude: set[str]) -> dict[str, Any] | None:
+        """A daypart can name specific `artists` and/or `genres` it wants
+        (e.g. a themed hour) instead of, or alongside, a mood target. Pulled
+        straight from Jellyfin rather than the mood catalogue -- there's no
+        need for AudioMuse-AI's data just to say "play some Dua Lipa"."""
+        artists = daypart.get("artists") or []
+        genres = daypart.get("genres") or []
+        if not artists and not genres:
+            return None
+        pool: list[dict[str, Any]] = []
+        for artist in artists:
+            pool.extend(self.jf.tracks_by_artist(artist))
+        for genre in genres:
+            pool.extend(self.jf.tracks_by_genre(genre))
+        pool = [item for item in pool if item.get("Id") not in exclude]
+        if not pool:
+            return None
+        item = random.choice(pool)
+        return {
+            "item_id": item["Id"],
+            "title": item.get("Name"),
+            "author": ", ".join(item.get("Artists") or []),
         }
 
     def _refill_plan(self) -> None:

@@ -1,31 +1,33 @@
 {
-  "_comment": "Loose daypart guardrails, in server-local time. `hours` is a [start, end) range in 24h clock; a window that wraps past midnight (like night) is written as start > end and handled that way in code. `mood` weights are matched against the same six-dimension mood vector AudioMuse-AI stores per track (happy/sad/aggressive/party/relaxed/danceable) - values are just relative targets, not required to sum to 1. `exploration` (low/medium/high, default medium) loosens how far from the target the adaptive picker is willing to wander -- higher means more variety, lower means it sticks closer to the mood target.",
+  "_comment": "Loose daypart guardrails, in server-local time (TZ set on the dj container). `hours` is a [start, end) range in 24h clock; a window that wraps past midnight (like night, or the weekend techno slot) is written as start > end and handled that way in code -- the early-morning tail is attributed to the day whose evening started it. `days` is optional: a list of weekdays (0=Monday .. 6=Sunday, i.e. Python's datetime.weekday()) the entry applies to; omit it (or leave unset) for every day. Entries are matched top to bottom, first match wins -- so more specific day/hour overrides belong above the generic fallback dayparts. `mood` weights are matched against the same six-dimension mood vector AudioMuse-AI stores per track (happy/sad/aggressive/party/relaxed/danceable) - values are relative targets, not required to sum to 1, and are only used when `artists`/`genres` don't already supply a pool (or as the fallback when that pool comes up empty). `artists` and `genres` pull straight from Jellyfin instead of the mood catalogue -- for a themed hour that wants specific acts or a specific tag rather than just a vibe. `exploration` (low/medium/high, default medium) loosens how far from the mood target the adaptive picker is willing to wander -- higher means more variety, lower means it sticks closer to the target. Only used for mood-based picks, not artists/genres.",
   "dayparts": [
     {
-      "name": "morning",
-      "hours": [6, 10],
-      "mood": {"relaxed": 0.7, "happy": 0.5, "aggressive": 0.15, "danceable": 0.25}
+      "name": "pop_girly_hour",
+      "hours": [19, 20],
+      "artists": ["Taylor Swift", "Dua Lipa", "Charli XCX", "Poppy"],
+      "mood": {"happy": 0.7, "danceable": 0.6, "party": 0.5},
+      "exploration": "low"
     },
     {
-      "name": "midday",
-      "hours": [10, 14],
-      "mood": {"danceable": 0.5, "party": 0.4, "happy": 0.55, "relaxed": 0.35}
+      "name": "techno_party_thursday",
+      "days": [3],
+      "hours": [20, 22],
+      "genres": ["Techno"],
+      "mood": {"party": 0.9, "danceable": 0.9, "aggressive": 0.4, "happy": 0.5},
+      "exploration": "medium"
     },
     {
-      "name": "afternoon",
-      "hours": [14, 18],
-      "mood": {"party": 0.55, "aggressive": 0.45, "danceable": 0.6, "happy": 0.4}
+      "name": "techno_party_weekend",
+      "days": [4, 5],
+      "hours": [20, 2],
+      "genres": ["Techno"],
+      "mood": {"party": 0.9, "danceable": 0.9, "aggressive": 0.4, "happy": 0.5},
+      "exploration": "medium"
     },
-    {
-      "name": "evening",
-      "hours": [18, 23],
-      "mood": {"party": 0.6, "danceable": 0.5, "happy": 0.45},
-      "exploration": "high"
-    },
-    {
-      "name": "night",
-      "hours": [23, 6],
-      "mood": {"relaxed": 0.7, "sad": 0.4, "aggressive": 0.1, "party": 0.15}
-    }
+    {"name": "morning", "hours": [6, 10], "mood": {"relaxed": 0.7, "happy": 0.5, "aggressive": 0.15, "danceable": 0.25}},
+    {"name": "midday", "hours": [10, 14], "mood": {"danceable": 0.5, "party": 0.4, "happy": 0.55, "relaxed": 0.35}},
+    {"name": "afternoon", "hours": [14, 18], "mood": {"party": 0.55, "aggressive": 0.45, "danceable": 0.6, "happy": 0.4}},
+    {"name": "evening", "hours": [18, 23], "mood": {"party": 0.6, "danceable": 0.5, "happy": 0.45}, "exploration": "high"},
+    {"name": "night", "hours": [23, 6], "mood": {"relaxed": 0.7, "sad": 0.4, "aggressive": 0.1, "party": 0.15}}
   ]
 }

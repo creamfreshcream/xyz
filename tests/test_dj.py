@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from dj.dj import (
     Catalogue,
     Config,
+    Dj,
     DjState,
     _escape,
     annotate_uri,
@@ -91,6 +93,27 @@ def test_current_daypart_handles_windows_wrapping_past_midnight():
 def test_current_daypart_falls_back_to_the_first_entry_on_a_gap():
     # 14-23 isn't covered by SCHEDULE above.
     assert current_daypart(SCHEDULE, datetime(2024, 1, 1, 16))["name"] == "morning"
+
+
+WEEKEND_SCHEDULE = [
+    {"name": "techno_weekend", "days": [4, 5], "hours": [20, 2], "mood": {}},
+    {"name": "fallback", "hours": [0, 24], "mood": {}},
+]
+
+
+def test_current_daypart_day_restricted_entry_only_matches_listed_days():
+    # 2024-01-05 is a Friday (day 4), 2024-01-01 is a Monday (day 0).
+    assert current_daypart(WEEKEND_SCHEDULE, datetime(2024, 1, 5, 21))["name"] == "techno_weekend"
+    assert current_daypart(WEEKEND_SCHEDULE, datetime(2024, 1, 1, 21))["name"] == "fallback"
+
+
+def test_current_daypart_wrap_tail_is_attributed_to_the_day_that_started_it():
+    # Saturday/Sunday 01:00 are the tail of Friday's/Saturday's window.
+    assert current_daypart(WEEKEND_SCHEDULE, datetime(2024, 1, 6, 1))["name"] == "techno_weekend"
+    assert current_daypart(WEEKEND_SCHEDULE, datetime(2024, 1, 7, 1))["name"] == "techno_weekend"
+    # Friday 01:00's previous day is Thursday, which isn't in [4, 5] -- must
+    # not inherit Saturday's window a full day early.
+    assert current_daypart(WEEKEND_SCHEDULE, datetime(2024, 1, 5, 1))["name"] == "fallback"
 
 
 def test_escape_collapses_whitespace_and_escapes_quotes():
@@ -201,3 +224,48 @@ def test_catalogue_pick_target_excludes_recent_tracks():
     picked = cat.pick_target({"happy": 1.0}, exclude_ids={"only"}, exploration="low")
     # Nothing left to exclude to, so it falls back to the full pool rather than None.
     assert picked["item_id"] == "only"
+
+
+class FakePreferenceJellyfin:
+    """Fake covering the artist/genre lookups _pick_preferred uses."""
+
+    def __init__(self, by_artist=None, by_genre=None):
+        self.by_artist = by_artist or {}
+        self.by_genre = by_genre or {}
+
+    def tracks_by_artist(self, name):
+        return self.by_artist.get(name, [])
+
+    def tracks_by_genre(self, genre):
+        return self.by_genre.get(genre, [])
+
+
+def make_dj(tmp_path, schedule):
+    schedule_path = tmp_path / "schedule.json"
+    schedule_path.write_text(json.dumps({"dayparts": schedule}))
+    dj = Dj(config(DJ_SCHEDULE_FILE=str(schedule_path), DJ_STATE_FILE=str(tmp_path / "state.json")))
+    return dj
+
+
+def test_pick_preferred_returns_none_without_artists_or_genres(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    assert dj._pick_preferred({"mood": {}}, exclude=set()) is None
+
+
+def test_pick_preferred_pulls_from_named_artists(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin(by_artist={"Some Artist": [{"Id": "1", "Name": "A", "Artists": ["Some Artist"]}]})
+    picked = dj._pick_preferred({"artists": ["Some Artist"]}, exclude=set())
+    assert picked["item_id"] == "1"
+
+
+def test_pick_preferred_excludes_recent_tracks(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin(by_artist={"A": [{"Id": "1", "Name": "Only"}]})
+    assert dj._pick_preferred({"artists": ["A"]}, exclude={"1"}) is None
+
+
+def test_pick_preferred_falls_back_to_none_when_pool_empty(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin()
+    assert dj._pick_preferred({"artists": ["Nobody Here"], "genres": ["Nonexistent"]}, exclude=set()) is None
