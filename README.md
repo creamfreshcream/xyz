@@ -123,6 +123,7 @@ Everything lives in `.env`.
 | `DJ_LOOKAHEAD_TRACKS` | `6` | Tracks kept queued ahead in Liquidsoap |
 | `DJ_LOOP_INTERVAL` | `60` | Seconds between queue top-up checks |
 | `DJ_BRIDGE_MAX_TRACKS` | `14` | Cap on tracks spent bridging to a new target |
+| `DJ_THEMED_BRIDGE_MAX_TRACKS` | `4` | Same, but for a themed daypart (artists/genres/tags) -- time-boxed slots like a theme hour need to actually reach their own content quickly |
 | `DJ_DWELL_TRACKS` | `6` | Tracks spent lingering near a target |
 | `DJ_RECENT_TRACK_HOURS` / `DJ_RECENT_ARTIST_MINUTES` | `3` / `45` | Repeat-avoidance windows |
 | `DJ_STATUS_PORT` | `9090` | The `dj` service's own status/override API |

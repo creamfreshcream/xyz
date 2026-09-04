@@ -101,6 +101,7 @@ class Config:
     lookahead_tracks: int
     loop_interval: float
     bridge_max_tracks: int
+    themed_bridge_max_tracks: int
     dwell_tracks: int
     recent_track_window_hours: float
     recent_artist_window_minutes: float
@@ -139,6 +140,13 @@ class Config:
             lookahead_tracks=_env_int("DJ_LOOKAHEAD_TRACKS", 6),
             loop_interval=_env_float("DJ_LOOP_INTERVAL", 60.0),
             bridge_max_tracks=_env_int("DJ_BRIDGE_MAX_TRACKS", 14),
+            # A themed daypart (artists/genres/tags) is time-boxed -- e.g. a
+            # 60-minute theme hour -- so it needs to actually reach its own
+            # content quickly. The full bridge_max_tracks (up to 14 sonic
+            # steps) can eat most or all of a themed slot on its own before
+            # a single on-theme track plays; found live in a Friday "80s"
+            # hour still nowhere near 80s territory 40 minutes in.
+            themed_bridge_max_tracks=_env_int("DJ_THEMED_BRIDGE_MAX_TRACKS", 4),
             dwell_tracks=_env_int("DJ_DWELL_TRACKS", 6),
             recent_track_window_hours=_env_float("DJ_RECENT_TRACK_HOURS", 3.0),
             recent_artist_window_minutes=_env_float("DJ_RECENT_ARTIST_MINUTES", 45.0),
@@ -976,6 +984,7 @@ class Dj:
         self.song_map = SongMap(cfg)
         self.album_index = AlbumIndex(self.jf)
         self._item_cache: dict[str, dict[str, Any]] = {}
+        self._current_daypart: dict[str, Any] | None = None
         self.schedule, self.constraints = load_schedule(cfg.schedule_file)
         self.state = DjState.load(cfg.state_file)
         # RLock, not Lock: run()'s main loop holds this for the whole tick,
@@ -1069,9 +1078,14 @@ class Dj:
             manual = self.state.manual_target
             self.state.manual_target = None
         if manual:
+            # No daypart context for a manual override -- _refill_plan falls
+            # back to build_dwell's sonic-similarity picks for the dwell
+            # phase rather than a themed pool.
+            self._current_daypart = None
             return manual
 
         daypart = current_daypart(self.schedule)
+        self._current_daypart = daypart
         self.state.daypart = daypart["name"]
         exclude = self.state.recent_track_ids(self.cfg.recent_track_window_hours) | self.state.active_penalty_ids(
             daypart["name"]
@@ -1094,21 +1108,19 @@ class Dj:
             "author": ", ".join(item.get("Artists") or []) if item else None,
         }
 
-    def _pick_preferred(
+    def _preference_pool(
         self, daypart: dict[str, Any], exclude: set[str], min_dims: dict[str, float] | None = None
-    ) -> dict[str, Any] | None:
-        """A daypart can name specific `artists`, Jellyfin `genres`, and/or
-        AudioMuse-AI classifier `tags` it wants (e.g. a themed hour) instead
-        of, or alongside, a mood target. `artists`/`genres` are pulled
-        straight from Jellyfin; `tags` go through AudioMuse-AI's own
-        genre/vocal-type classifier (see Catalogue.tag_pool) -- that's how a
-        themed hour can mean "this vibe, whoever's actually in the library"
-        rather than a fixed, hand-picked artist list."""
+    ) -> list[dict[str, Any]]:
+        """The combined artists/genres/tags candidate pool a themed daypart
+        draws from -- deduplicated and filtered by exclude/min_dims. Shared
+        by _pick_preferred (one pick, for a fresh target) and
+        _pick_preferred_many (several picks, to keep a themed dwell phase
+        actually on-theme -- see _refill_plan)."""
         artists = daypart.get("artists") or []
         genres = daypart.get("genres") or []
         tags = daypart.get("tags") or []
         if not artists and not genres and not tags:
-            return None
+            return []
         pool: list[dict[str, Any]] = []
         for artist in artists:
             pool.extend(self.jf.tracks_by_artist(artist))
@@ -1119,14 +1131,33 @@ class Dj:
             if len(ids) > 150:
                 ids = random.sample(ids, 150)
             pool.extend(self.jf.items_by_ids(ids))
-        pool = [item for item in pool if item.get("Id") not in exclude]
+        seen: set[str] = set()
+        unique: list[dict[str, Any]] = []
+        for item in pool:
+            item_id = item.get("Id")
+            if item_id and item_id not in exclude and item_id not in seen:
+                seen.add(item_id)
+                unique.append(item)
         if min_dims:
             # Same soft-floor behaviour as Catalogue.pick_target: prefer
             # tracks that clear it, but a themed pool full of atmospheric
             # tracks shouldn't be emptied out entirely by it.
-            floored = [item for item in pool if self.catalogue.meets_minimums(item["Id"], min_dims)]
+            floored = [item for item in unique if self.catalogue.meets_minimums(item["Id"], min_dims)]
             if floored:
-                pool = floored
+                unique = floored
+        return unique
+
+    def _pick_preferred(
+        self, daypart: dict[str, Any], exclude: set[str], min_dims: dict[str, float] | None = None
+    ) -> dict[str, Any] | None:
+        """A daypart can name specific `artists`, Jellyfin `genres`, and/or
+        AudioMuse-AI classifier `tags` it wants (e.g. a themed hour) instead
+        of, or alongside, a mood target. `artists`/`genres` are pulled
+        straight from Jellyfin; `tags` go through AudioMuse-AI's own
+        genre/vocal-type classifier (see Catalogue.tag_pool) -- that's how a
+        themed hour can mean "this vibe, whoever's actually in the library"
+        rather than a fixed, hand-picked artist list."""
+        pool = self._preference_pool(daypart, exclude, min_dims)
         if not pool:
             return None
         item = random.choice(pool)
@@ -1136,13 +1167,36 @@ class Dj:
             "author": ", ".join(item.get("Artists") or []),
         }
 
+    def _pick_preferred_many(
+        self, daypart: dict[str, Any], exclude: set[str], n: int, min_dims: dict[str, float] | None = None
+    ) -> list[dict[str, Any]]:
+        """Several distinct picks from the same themed pool _pick_preferred
+        draws from -- used for the dwell phase of a themed daypart instead
+        of build_dwell's pure sonic-similarity picks. build_dwell doesn't
+        know about a daypart's artists/genres/tags at all (it just asks
+        AudioMuse-AI for tracks near the target's *sound*), so a themed
+        hour's dwell phase could drift off-theme within a track or two of
+        arriving -- found live: a Friday "80s" hour was still audibly
+        nowhere near 80s territory 40 minutes in, well past the single
+        target track this replaces."""
+        pool = self._preference_pool(daypart, exclude, min_dims)
+        random.shuffle(pool)
+        picked = pool[:n]
+        return [
+            {"item_id": item["Id"], "title": item.get("Name"), "author": ", ".join(item.get("Artists") or [])}
+            for item in picked
+        ]
+
     def _refill_plan(self) -> None:
         target = self._next_target()
+        daypart = self._current_daypart
         self.state.target = target
         self.state.phase = "transitioning"
         log.info("New target: %s - %s (%s)", target.get("author"), target.get("title"), self.state.daypart)
 
-        bridge = build_bridge(self.jf, self.state.last_item_id, target["item_id"], self.cfg.bridge_max_tracks)
+        is_themed = bool(daypart and (daypart.get("artists") or daypart.get("genres") or daypart.get("tags")))
+        bridge_max = self.cfg.themed_bridge_max_tracks if is_themed else self.cfg.bridge_max_tracks
+        bridge = build_bridge(self.jf, self.state.last_item_id, target["item_id"], bridge_max)
         if not bridge:
             bridge = [target]
         exclude = (
@@ -1150,7 +1204,16 @@ class Dj:
             | self.state.active_penalty_ids(self.state.daypart)
             | {target["item_id"]}
         )
-        dwell = build_dwell(self.jf, target["item_id"], self.cfg.dwell_tracks, exclude)
+        if is_themed:
+            # Keep a themed daypart's dwell phase actually on-theme instead
+            # of build_dwell's sonic-similarity picks, which don't know
+            # about the daypart's artists/genres/tags at all -- see
+            # _pick_preferred_many's docstring.
+            dwell = self._pick_preferred_many(
+                daypart, exclude, self.cfg.dwell_tracks, active_min_dims(self.constraints)
+            )
+        else:
+            dwell = build_dwell(self.jf, target["item_id"], self.cfg.dwell_tracks, exclude)
 
         self.state.plan = bridge + dwell
         self.state.phase = "dwelling" if dwell else "transitioning"
@@ -1245,12 +1308,31 @@ class Dj:
             prior = track
         return sequence
 
+    def _discard_plan_on_daypart_change(self) -> None:
+        """Without this, a daypart boundary is only noticed once the current
+        plan happens to run dry -- found live: a themed hour's start (and,
+        symmetrically, its end) could sit unnoticed behind a long leftover
+        bridge/dwell backlog from the previous daypart for most of the hour.
+        Discarding the not-yet-pushed plan here forces _refill_plan to pick
+        a fresh target for the new daypart on the very next _tick loop
+        iteration, rather than whenever the old plan happens to run out.
+        Tracks already pushed to Liquidsoap's own queue still finish playing
+        -- this doesn't cut anything off mid-stream."""
+        if self.state.manual_target:
+            return
+        fresh_daypart = current_daypart(self.schedule)["name"]
+        if self.state.daypart is not None and fresh_daypart != self.state.daypart and self.state.plan:
+            log.info("Daypart boundary: %s -> %s, replanning now", self.state.daypart, fresh_daypart)
+            self.state.plan = []
+
     def _tick(self) -> None:
         try:
             current_len = queue_length(self.cfg)
         except (OSError, LiquidsoapError) as exc:
             log.warning("Could not reach Liquidsoap telnet (%s), will retry", exc)
             return
+
+        self._discard_plan_on_daypart_change()
 
         while current_len < self.cfg.lookahead_tracks:
             if not self.state.plan:

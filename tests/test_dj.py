@@ -468,6 +468,110 @@ def test_next_target_applies_active_constraints_to_the_mood_pick(tmp_path, monke
     assert target["item_id"] == "high"
 
 
+def test_pick_preferred_many_returns_distinct_picks_up_to_n(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin(by_artist={"A": [
+        {"Id": "1", "Name": "T1", "Artists": ["A"]},
+        {"Id": "2", "Name": "T2", "Artists": ["A"]},
+        {"Id": "3", "Name": "T3", "Artists": ["A"]},
+    ]})
+    picked = dj._pick_preferred_many({"artists": ["A"]}, exclude=set(), n=2)
+    assert len(picked) == 2
+    assert len({p["item_id"] for p in picked}) == 2
+    assert {p["item_id"] for p in picked} <= {"1", "2", "3"}
+
+
+def test_pick_preferred_many_returns_empty_without_artists_genres_or_tags(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    assert dj._pick_preferred_many({"mood": {}}, exclude=set(), n=3) == []
+
+
+def test_refill_plan_uses_the_themed_pool_for_dwell_on_a_themed_daypart(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "tags": ["80s"], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin(by_ids={
+        "1": {"Id": "1", "Name": "Target", "Artists": []},
+        "2": {"Id": "2", "Name": "Dwell candidate", "Artists": []},
+    })
+    monkeypatch.setattr(
+        dj.catalogue, "tag_pool",
+        lambda tags, exclude, min_score=0.3: [i for i in ["1", "2"] if i not in exclude],
+    )
+    monkeypatch.setattr("dj.dj.build_bridge", lambda jf, from_id, to_id, max_tracks: [])
+    dj._refill_plan()
+    # Which of "1"/"2" ends up the target vs. the dwell candidate is a
+    # random.choice pick inside _pick_preferred -- assert on the roles, not
+    # a specific id. Not crashing here also proves build_dwell (which needs
+    # jf.similar_tracks, unimplemented on this fake) was never called.
+    ids = [p["item_id"] for p in dj.state.plan]
+    assert set(ids) == {"1", "2"}
+    assert ids[0] == dj.state.target["item_id"]
+
+
+def test_refill_plan_uses_the_themed_bridge_cap_for_themed_dayparts(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "tags": ["80s"], "mood": {}}])
+    dj.jf = FakePreferenceJellyfin(by_ids={"1": {"Id": "1", "Name": "Target", "Artists": []}})
+    monkeypatch.setattr(dj.catalogue, "tag_pool", lambda tags, exclude, min_score=0.3: ["1"])
+    captured = {}
+
+    def fake_build_bridge(jf, from_id, to_id, max_tracks):
+        captured["max_tracks"] = max_tracks
+        return []
+
+    monkeypatch.setattr("dj.dj.build_bridge", fake_build_bridge)
+    dj._refill_plan()
+    assert captured["max_tracks"] == dj.cfg.themed_bridge_max_tracks
+
+
+def test_refill_plan_uses_the_full_bridge_cap_for_non_themed_dayparts(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {"happy": 1.0}}])
+    dj.jf = FakeItemJellyfin()
+    dj.catalogue._tracks = [{"item_id": "1", "mood": {"happy": 1.0}}]
+    monkeypatch.setattr(dj.catalogue, "refresh", lambda: None)
+    captured = {}
+
+    def fake_build_bridge(jf, from_id, to_id, max_tracks):
+        captured["max_tracks"] = max_tracks
+        return []
+
+    monkeypatch.setattr("dj.dj.build_bridge", fake_build_bridge)
+    monkeypatch.setattr("dj.dj.build_dwell", lambda *a, **k: [])
+    dj._refill_plan()
+    assert captured["max_tracks"] == dj.cfg.bridge_max_tracks
+
+
+def test_discard_plan_on_daypart_change_clears_a_stale_plan(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "current", "hours": [0, 24], "mood": {}}])
+    dj.state.daypart = "previous"
+    dj.state.plan = [{"item_id": "leftover"}]
+    dj._discard_plan_on_daypart_change()
+    assert dj.state.plan == []
+
+
+def test_discard_plan_on_daypart_change_leaves_a_matching_daypart_alone(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "current", "hours": [0, 24], "mood": {}}])
+    dj.state.daypart = "current"
+    dj.state.plan = [{"item_id": "leftover"}]
+    dj._discard_plan_on_daypart_change()
+    assert dj.state.plan == [{"item_id": "leftover"}]
+
+
+def test_discard_plan_on_daypart_change_does_nothing_on_the_very_first_run(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "current", "hours": [0, 24], "mood": {}}])
+    assert dj.state.daypart is None
+    dj.state.plan = [{"item_id": "leftover"}]
+    dj._discard_plan_on_daypart_change()
+    assert dj.state.plan == [{"item_id": "leftover"}]
+
+
+def test_discard_plan_on_daypart_change_skips_when_a_manual_override_is_pending(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "current", "hours": [0, 24], "mood": {}}])
+    dj.state.daypart = "previous"
+    dj.state.plan = [{"item_id": "leftover"}]
+    dj.state.manual_target = {"item_id": "manual"}
+    dj._discard_plan_on_daypart_change()
+    assert dj.state.plan == [{"item_id": "leftover"}]
+
+
 class FakePlaylistJellyfin:
     def __init__(self):
         self.created = []
