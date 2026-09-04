@@ -1128,7 +1128,11 @@ class Dj:
 
           * "double feature": an accidental same-artist back-to-back gets
             corrected to whatever really follows the previous track on its
-            own album, unless that track is itself excluded.
+            own album, unless that track is itself excluded -- or is the
+            deliberately mood/tag-picked target track (self.state.target),
+            which build_bridge/build_dwell already led into and around, and
+            which /status is telling listeners the DJ is heading for. Only
+            candidates picked along the way are fair game for the swap.
           * a short prelude preceding this track on its album completes it
             (gets prepended) with PRELUDE_CHANCE odds -- and the reverse:
             if this track IS such a short prelude, its own main track
@@ -1143,7 +1147,9 @@ class Dj:
             return [item]
 
         previous = self._full_item(self.state.last_item_id)
-        if previous and self._same_artist(previous, full) and not self.album_index.is_album_consecutive(
+        target_id = (self.state.target or {}).get("item_id")
+        is_target = target_id is not None and full.get("Id") == target_id
+        if previous and not is_target and self._same_artist(previous, full) and not self.album_index.is_album_consecutive(
             previous, full
         ):
             successor = self.album_index.next_track(previous)

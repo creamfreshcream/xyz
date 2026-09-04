@@ -743,6 +743,19 @@ def test_apply_album_awareness_double_feature_swaps_in_the_real_album_successor(
     assert result[0]["segue"] is True
 
 
+def test_apply_album_awareness_double_feature_never_swaps_out_the_target_track(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    a1 = make_track("a1", "alb", 1, artists=["Artist"])
+    a2 = make_track("a2", "alb", 2, artists=["Artist"])
+    wrong_pick = make_track("wrong", "other-alb", 1, artists=["Artist"])
+    dj.jf = FakeAlbumJellyfin({"a1": a1, "a2": a2, "wrong": wrong_pick})
+    dj.album_index = AlbumIndex(dj.jf)
+    dj.state.last_item_id = "a1"
+    dj.state.target = {"item_id": "wrong"}
+    result = dj._apply_album_awareness({"item_id": "wrong"})
+    assert [t["Id"] for t in result] == ["wrong"]
+
+
 def test_apply_album_awareness_leaves_a_genuine_album_sequence_alone(tmp_path):
     dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
     a1 = make_track("a1", "alb", 1)
