@@ -119,22 +119,42 @@ music =
     music
   end
 
-# `smart=true` is Liquidsoap's loudness-aware crossfade: it measures the dB
-# level at the tail of the outgoing track and the head of the incoming one
-# and picks the transition accordingly (full crossfade when both are close in
-# level, a plain fade when one is much quieter/louder, avoiding either an
-# audible level jump or two loud tracks smearing into mush). `duration` is
-# the buffered analysis window and must be a bit larger than the fades
-# themselves so there's enough lookahead data to make that call.
+# Loudness-aware crossfade, hand-rolled on top of `cross()` instead of
+# `crossfade(smart=true, ...)` -- the built-in "smart" mode makes the same
+# kind of decision but never explains it in the logs, which makes the
+# thresholds impossible to tune from the outside. This logs every
+# transition's measured dB levels and the decision made from them, and the
+# thresholds themselves are env-configurable so they can actually be tuned
+# against what shows up in the log rather than guessed at blind.
+crossfade_high_db = env_float("RADIO_CROSSFADE_HIGH_DB", -15.)
+crossfade_low_db = env_float("RADIO_CROSSFADE_LOW_DB", -32.)
+crossfade_margin_db = env_float("RADIO_CROSSFADE_MARGIN_DB", 4.)
+
+def smart_transition(a, b) =
+  let {db_level = a_level, metadata = a_meta, source = a_source} = a
+  let {db_level = b_level, metadata = b_meta, source = b_source} = b
+  let a_title = list.assoc(default="?", "title", a_meta)
+  let b_title = list.assoc(default="?", "title", b_meta)
+  log(label="smart_crossfade", level=3,
+    "#{a_title} (#{a_level}dB) -> #{b_title} (#{b_level}dB)")
+  if a_level >= crossfade_high_db and b_level >= crossfade_high_db then
+    log(label="smart_crossfade", level=3, "  decision: crossfade (both loud)")
+    add(normalize=false, [fade.out(duration=crossfade_duration, a_source), fade.in(duration=crossfade_duration, b_source)])
+  elsif a_level < crossfade_low_db or b_level < crossfade_low_db then
+    log(label="smart_crossfade", level=3, "  decision: sequence (one side too quiet to blend)")
+    sequence([a_source, b_source])
+  elsif abs(a_level - b_level) <= crossfade_margin_db then
+    log(label="smart_crossfade", level=3, "  decision: crossfade (similar levels)")
+    add(normalize=false, [fade.out(duration=crossfade_duration, a_source), fade.in(duration=crossfade_duration, b_source)])
+  else
+    log(label="smart_crossfade", level=3, "  decision: fade (level mismatch)")
+    add(normalize=false, [fade.out(duration=crossfade_duration, a_source), fade.in(duration=crossfade_duration, b_source)])
+  end
+end
+
 music =
   if crossfade_duration > 0. then
-    crossfade(
-      smart=true,
-      fade_in=crossfade_duration,
-      fade_out=crossfade_duration,
-      duration=crossfade_duration + 2.,
-      music
-    )
+    cross(id="smart_crossfade", duration=crossfade_duration + 2., smart_transition, music)
   else
     music
   end
