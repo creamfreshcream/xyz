@@ -245,9 +245,10 @@ The tests cover `dj`'s pure logic — mood-vector distance, daypart resolution, 
 subsampling, the `annotate:` escaping, and state persistence — against fakes, so no
 Jellyfin, Postgres, or Liquidsoap instance is needed.
 
-Check the Liquidsoap script without starting the stack:
+Check the Liquidsoap script without starting the stack. The image's entrypoint is
+already `liquidsoap`, and a bind-mounted file can trip rootless-Docker/podman
+permissions, so pipe the script in over stdin instead:
 
 ```bash
-docker run --rm -v "$PWD/liquidsoap/radio.liq:/tmp/radio.liq:ro" \
-  savonet/liquidsoap:v2.2.5 liquidsoap --check /tmp/radio.liq
+cat liquidsoap/radio.liq | docker run --rm -i savonet/liquidsoap:v2.2.5 --check -
 ```

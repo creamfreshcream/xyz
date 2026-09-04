@@ -135,9 +135,18 @@ def smart_transition(a, b) =
   let {db_level = b_level, metadata = b_meta, source = b_source} = b
   let a_title = list.assoc(default="?", "title", a_meta)
   let b_title = list.assoc(default="?", "title", b_meta)
+  # Set by the dj service (annotate: ...,segue="true":...) whenever the
+  # incoming track is genuinely album-consecutive with the one ending --
+  # naturally, via its "double feature" fix, or as a prelude/main-track
+  # pair. Overrides the dB-based decision entirely: albums are sequenced by
+  # the artist, a blended transition would work against that.
+  let segue = list.assoc(default="false", "segue", b_meta) == "true"
+  let segue_note = if segue then " [segue: album-consecutive, no crossfade]" else "" end
   log(label="smart_crossfade", level=3,
-    "#{a_title} (#{a_level}dB) -> #{b_title} (#{b_level}dB)")
-  if a_level >= crossfade_high_db and b_level >= crossfade_high_db then
+    "#{a_title} (#{a_level}dB) -> #{b_title} (#{b_level}dB)#{segue_note}")
+  if segue then
+    sequence([a_source, b_source])
+  elsif a_level >= crossfade_high_db and b_level >= crossfade_high_db then
     log(label="smart_crossfade", level=3, "  decision: crossfade (both loud)")
     add(normalize=false, [fade.out(duration=crossfade_duration, a_source), fade.in(duration=crossfade_duration, b_source)])
   elsif a_level < crossfade_low_db or b_level < crossfade_low_db then

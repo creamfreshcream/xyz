@@ -50,6 +50,9 @@ log = logging.getLogger("dj")
 
 USER_AGENT = "jellyfin-radio-dj/1.0"
 MOOD_DIMENSIONS = ("happy", "sad", "aggressive", "party", "relaxed", "danceable")
+ALBUM_AWARE_FIELDS = "Artists,Album,AlbumId,ParentIndexNumber,IndexNumber,RunTimeTicks"
+PRELUDE_MAX_SECONDS = 60.0
+PRELUDE_CHANCE = 0.5
 
 
 # --------------------------------------------------------------------- config
@@ -262,10 +265,23 @@ class Jellyfin:
 
     def item(self, item_id: str) -> dict[str, Any] | None:
         data = self.get(
-            "/Items", {"Ids": item_id, "Fields": "Artists,Album", "Recursive": "true"}
+            "/Items",
+            {"Ids": item_id, "Fields": ALBUM_AWARE_FIELDS, "Recursive": "true"},
         )
         items = data.get("Items", [])
         return items[0] if items else None
+
+    def album_tracks(self, album_id: str) -> list[dict[str, Any]]:
+        data = self.get(
+            "/Items",
+            {
+                "ParentId": album_id,
+                "IncludeItemTypes": "Audio",
+                "Recursive": "true",
+                "Fields": ALBUM_AWARE_FIELDS,
+            },
+        )
+        return data.get("Items", [])
 
     def find_path(self, start_id: str, end_id: str, max_steps: int = 300) -> list[dict[str, Any]]:
         data = self.get(
@@ -298,6 +314,82 @@ class Jellyfin:
         return f"{self.cfg.jellyfin_url}/Audio/{item_id}/stream?{query}"
 
 
+class AlbumIndex:
+    """How the artist actually sequenced each album, read from Jellyfin and
+    cached per album (album track order doesn't change once analysed, so
+    there's no need to ever invalidate this within a process's lifetime).
+
+    Backs three pieces of album-awareness in the DJ:
+      * "double feature" -- when the mood/similarity algorithm happens to
+        pick two tracks by the same artist back to back, trust that call but
+        swap the second one for whichever track actually follows the first
+        on its own album, if there is one.
+      * the "prelude table" -- whether a track is preceded on its album by a
+        short (<60s) track, e.g. a spoken intro or skit meant to lead
+        straight into it.
+      * no-crossfade tagging for any pair that's genuinely album-consecutive
+        (naturally, via the double-feature fix, or via a prelude), since a
+        blended transition would work against how the album was authored.
+    """
+
+    def __init__(self, jf: Jellyfin) -> None:
+        self.jf = jf
+        self._by_album: dict[str, list[dict[str, Any]]] = {}
+
+    def _tracks(self, album_id: str) -> list[dict[str, Any]]:
+        if album_id not in self._by_album:
+            try:
+                tracks = self.jf.album_tracks(album_id)
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                log.warning("Album lookup failed for %s (%s)", album_id, exc)
+                tracks = []
+            tracks.sort(key=lambda t: (t.get("ParentIndexNumber") or 1, t.get("IndexNumber") or 0))
+            self._by_album[album_id] = tracks
+        return self._by_album[album_id]
+
+    def _position(self, item: dict[str, Any]) -> tuple[list[dict[str, Any]], int] | None:
+        album_id = item.get("AlbumId")
+        if not album_id:
+            return None
+        tracks = self._tracks(album_id)
+        pos = next((i for i, t in enumerate(tracks) if t.get("Id") == item.get("Id")), None)
+        return (tracks, pos) if pos is not None else None
+
+    def next_track(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        """The track that actually follows `item` on its own album/disc."""
+        found = self._position(item)
+        if not found:
+            return None
+        tracks, pos = found
+        if pos + 1 >= len(tracks):
+            return None
+        nxt = tracks[pos + 1]
+        disc = item.get("ParentIndexNumber") or 1
+        return nxt if (nxt.get("ParentIndexNumber") or 1) == disc else None
+
+    def is_album_consecutive(self, a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
+        if not a or not b:
+            return False
+        nxt = self.next_track(a)
+        return bool(nxt and nxt.get("Id") == b.get("Id"))
+
+    def prelude_of(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        """A short (<60s) track immediately preceding `item` on the same
+        album/disc -- an intro/skit meant to lead straight into it."""
+        found = self._position(item)
+        if not found:
+            return None
+        tracks, pos = found
+        if pos == 0:
+            return None
+        prev = tracks[pos - 1]
+        disc = item.get("ParentIndexNumber") or 1
+        if (prev.get("ParentIndexNumber") or 1) != disc:
+            return None
+        seconds = (prev.get("RunTimeTicks") or 0) / 10_000_000
+        return prev if 0 < seconds < PRELUDE_MAX_SECONDS else None
+
+
 def _escape(value: str) -> str:
     cleaned = " ".join(str(value).split())
     return cleaned.replace("\\", "\\\\").replace('"', '\\"')
@@ -314,6 +406,11 @@ def annotate_uri(item: dict[str, Any], jf: Jellyfin) -> str | None:
     title = item.get("Name") or item.get("title") or "Unknown track"
     album = item.get("Album") or item.get("album") or ""
     fields = {"title": title, "artist": artist, "album": album}
+    if item.get("segue"):
+        # Read by radio.liq's smart_transition to force a hard cut instead
+        # of the usual dB-based crossfade decision -- set when this track is
+        # genuinely album-consecutive with whatever precedes it.
+        fields["segue"] = "true"
     annotations = ",".join(f'{k}="{_escape(v)}"' for k, v in fields.items() if v)
     return f"annotate:{annotations}:{jf.stream_url(item_id)}"
 
@@ -817,6 +914,8 @@ class Dj:
         self.jf = Jellyfin(cfg)
         self.catalogue = Catalogue(cfg)
         self.song_map = SongMap(cfg)
+        self.album_index = AlbumIndex(self.jf)
+        self._item_cache: dict[str, dict[str, Any]] = {}
         self.schedule = load_schedule(cfg.schedule_file)
         self.state = DjState.load(cfg.state_file)
         # RLock, not Lock: run()'s main loop holds this for the whole tick,
@@ -986,6 +1085,82 @@ class Dj:
         self.state.plan = bridge + dwell
         self.state.phase = "dwelling" if dwell else "transitioning"
 
+    def _full_item(self, ref: dict[str, Any] | str | None) -> dict[str, Any] | None:
+        """Resolves a plan entry (which may only carry the minimal
+        item_id/title/author fields build_bridge/build_dwell/etc. produce)
+        to the full Jellyfin item, including the album fields album-awareness
+        needs. Cached per process since album track order is effectively
+        static."""
+        if not ref:
+            return None
+        item_id = ref if isinstance(ref, str) else (ref.get("Id") or ref.get("item_id"))
+        if not item_id:
+            return None
+        if item_id not in self._item_cache:
+            try:
+                item = self.jf.item(item_id)
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                log.warning("Could not resolve item %s (%s)", item_id, exc)
+                item = None
+            if item:
+                self._item_cache[item_id] = item
+        return self._item_cache.get(item_id)
+
+    @staticmethod
+    def _same_artist(a: dict[str, Any], b: dict[str, Any]) -> bool:
+        a_artists = set(a.get("Artists") or [])
+        b_artists = set(b.get("Artists") or [])
+        return bool(a_artists & b_artists)
+
+    def _apply_album_awareness(self, item: dict[str, Any]) -> list[dict[str, Any]]:
+        """Runs right before a track is pushed, with the actual previously
+        pushed track (self.state.last_item_id) as ground truth for what
+        comes right before it:
+
+          * "double feature": an accidental same-artist back-to-back gets
+            corrected to whatever really follows the previous track on its
+            own album, unless that track is itself excluded.
+          * a short prelude preceding this track on its album completes it
+            (gets prepended) with PRELUDE_CHANCE odds.
+          * every resulting pair that's genuinely album-consecutive is
+            tagged 'segue' so radio.liq hard-cuts instead of crossfading.
+
+        Falls back to the untouched item (no swap/prelude/segue) whenever
+        Jellyfin lookups fail, rather than blocking playback on it."""
+        full = self._full_item(item)
+        if not full:
+            return [item]
+
+        previous = self._full_item(self.state.last_item_id)
+        if previous and self._same_artist(previous, full) and not self.album_index.is_album_consecutive(
+            previous, full
+        ):
+            successor = self.album_index.next_track(previous)
+            excluded = self.state.recent_track_ids(self.cfg.recent_track_window_hours) | self.state.active_penalty_ids(
+                self.state.daypart
+            )
+            if successor and successor.get("Id") not in excluded:
+                resolved = self._full_item(successor)
+                if resolved:
+                    log.info(
+                        "Double feature fix: %s -> album successor %s",
+                        full.get("Name"), resolved.get("Name"),
+                    )
+                    full = resolved
+
+        sequence = [full]
+        prelude = self.album_index.prelude_of(full)
+        if prelude and random.random() < PRELUDE_CHANCE:
+            resolved_prelude = self._full_item(prelude)
+            if resolved_prelude:
+                sequence = [resolved_prelude, full]
+
+        prior = previous
+        for track in sequence:
+            track["segue"] = self.album_index.is_album_consecutive(prior, track)
+            prior = track
+        return sequence
+
     def _tick(self) -> None:
         try:
             current_len = queue_length(self.cfg)
@@ -999,16 +1174,20 @@ class Dj:
                 if not self.state.plan:
                     break
             item = self.state.plan.pop(0)
-            uri = annotate_uri(item, self.jf)
-            if not uri:
-                continue
-            queue_push(self.cfg, uri)
-            self.state.record_played(item)
-            current_len += 1
-            log.info(
-                "Pushed: %s - %s (%d queued, %d planned)",
-                item.get("author"), item.get("title"), current_len, len(self.state.plan),
-            )
+            for push_item in self._apply_album_awareness(item):
+                uri = annotate_uri(push_item, self.jf)
+                if not uri:
+                    continue
+                queue_push(self.cfg, uri)
+                self.state.record_played(push_item)
+                current_len += 1
+                log.info(
+                    "Pushed: %s - %s (%d queued, %d planned)%s",
+                    push_item.get("author") or ", ".join(push_item.get("Artists") or []),
+                    push_item.get("title") or push_item.get("Name"),
+                    current_len, len(self.state.plan),
+                    " [segue]" if push_item.get("segue") else "",
+                )
 
         self._sync_playlist()
         self.state.save(self.cfg.state_file)

@@ -6,6 +6,7 @@ import pytest
 import struct as struct_mod
 
 from dj.dj import (
+    AlbumIndex,
     Catalogue,
     Config,
     Dj,
@@ -632,3 +633,159 @@ def test_map_trail_is_capped_to_the_configured_length(tmp_path, monkeypatch):
     assert len(trail) == dj.MAP_TRAIL_LENGTH
     assert trail[-1] == {"x": float(n - 1), "y": float(n - 1)}
     assert trail[0] == {"x": float(n - dj.MAP_TRAIL_LENGTH), "y": float(n - dj.MAP_TRAIL_LENGTH)}
+
+
+# --------------------------------------------------------- album awareness
+
+def make_track(track_id, album_id, index, disc=1, artists=None, runtime_seconds=180.0):
+    return {
+        "Id": track_id,
+        "Name": f"Track {track_id}",
+        "AlbumId": album_id,
+        "IndexNumber": index,
+        "ParentIndexNumber": disc,
+        "Artists": artists or ["Artist"],
+        "RunTimeTicks": int(runtime_seconds * 10_000_000),
+    }
+
+
+class FakeAlbumJellyfin:
+    """Doubles as both the album_tracks() source AlbumIndex needs and the
+    item() lookup Dj._full_item() needs, keyed off the same track dicts."""
+
+    def __init__(self, items_by_id):
+        self.items_by_id = items_by_id
+
+    def item(self, item_id):
+        return self.items_by_id.get(item_id)
+
+    def album_tracks(self, album_id):
+        return [t for t in self.items_by_id.values() if t.get("AlbumId") == album_id]
+
+
+def test_album_index_next_track_returns_the_following_track():
+    a1, a2 = make_track("a1", "alb", 1), make_track("a2", "alb", 2)
+    idx = AlbumIndex(FakeAlbumJellyfin({"a1": a1, "a2": a2}))
+    assert idx.next_track(a1)["Id"] == "a2"
+
+
+def test_album_index_next_track_returns_none_at_the_end_of_the_album():
+    a1 = make_track("a1", "alb", 1)
+    idx = AlbumIndex(FakeAlbumJellyfin({"a1": a1}))
+    assert idx.next_track(a1) is None
+
+
+def test_album_index_next_track_respects_disc_boundaries():
+    a1 = make_track("a1", "alb", 1, disc=1)
+    b1 = make_track("b1", "alb", 1, disc=2)
+    idx = AlbumIndex(FakeAlbumJellyfin({"a1": a1, "b1": b1}))
+    assert idx.next_track(a1) is None
+
+
+def test_album_index_is_album_consecutive():
+    a1, a2, a3 = make_track("a1", "alb", 1), make_track("a2", "alb", 2), make_track("a3", "alb", 3)
+    idx = AlbumIndex(FakeAlbumJellyfin({"a1": a1, "a2": a2, "a3": a3}))
+    assert idx.is_album_consecutive(a1, a2) is True
+    assert idx.is_album_consecutive(a1, a3) is False
+    assert idx.is_album_consecutive(None, a2) is False
+
+
+def test_album_index_prelude_of_detects_a_short_preceding_track():
+    intro = make_track("intro", "alb", 1, runtime_seconds=20)
+    main = make_track("main", "alb", 2, runtime_seconds=200)
+    idx = AlbumIndex(FakeAlbumJellyfin({"intro": intro, "main": main}))
+    assert idx.prelude_of(main)["Id"] == "intro"
+
+
+def test_album_index_prelude_of_ignores_a_normal_length_preceding_track():
+    t1 = make_track("t1", "alb", 1, runtime_seconds=200)
+    t2 = make_track("t2", "alb", 2, runtime_seconds=200)
+    idx = AlbumIndex(FakeAlbumJellyfin({"t1": t1, "t2": t2}))
+    assert idx.prelude_of(t2) is None
+
+
+def test_album_index_prelude_of_returns_none_for_the_first_track():
+    t1 = make_track("t1", "alb", 1)
+    idx = AlbumIndex(FakeAlbumJellyfin({"t1": t1}))
+    assert idx.prelude_of(t1) is None
+
+
+def test_apply_album_awareness_double_feature_swaps_in_the_real_album_successor(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    a1 = make_track("a1", "alb", 1, artists=["Artist"])
+    a2 = make_track("a2", "alb", 2, artists=["Artist"])
+    wrong_pick = make_track("wrong", "other-alb", 1, artists=["Artist"])
+    dj.jf = FakeAlbumJellyfin({"a1": a1, "a2": a2, "wrong": wrong_pick})
+    dj.album_index = AlbumIndex(dj.jf)
+    dj.state.last_item_id = "a1"
+    result = dj._apply_album_awareness({"item_id": "wrong"})
+    assert [t["Id"] for t in result] == ["a2"]
+    assert result[0]["segue"] is True
+
+
+def test_apply_album_awareness_leaves_a_genuine_album_sequence_alone(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    a1 = make_track("a1", "alb", 1)
+    a2 = make_track("a2", "alb", 2)
+    dj.jf = FakeAlbumJellyfin({"a1": a1, "a2": a2})
+    dj.album_index = AlbumIndex(dj.jf)
+    dj.state.last_item_id = "a1"
+    result = dj._apply_album_awareness({"item_id": "a2"})
+    assert [t["Id"] for t in result] == ["a2"]
+    assert result[0]["segue"] is True
+
+
+def test_apply_album_awareness_leaves_different_artists_alone(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    a1 = make_track("a1", "alb", 1, artists=["Artist A"])
+    b1 = make_track("b1", "alb2", 1, artists=["Artist B"])
+    dj.jf = FakeAlbumJellyfin({"a1": a1, "b1": b1})
+    dj.album_index = AlbumIndex(dj.jf)
+    dj.state.last_item_id = "a1"
+    result = dj._apply_album_awareness({"item_id": "b1"})
+    assert [t["Id"] for t in result] == ["b1"]
+    assert result[0]["segue"] is False
+
+
+def test_apply_album_awareness_double_feature_skips_an_excluded_successor(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    a1 = make_track("a1", "alb", 1, artists=["Artist"])
+    a2 = make_track("a2", "alb", 2, artists=["Artist"])
+    wrong_pick = make_track("wrong", "other-alb", 1, artists=["Artist"])
+    dj.jf = FakeAlbumJellyfin({"a1": a1, "a2": a2, "wrong": wrong_pick})
+    dj.album_index = AlbumIndex(dj.jf)
+    dj.state.last_item_id = "a1"
+    dj.state.history = [_history_entry("a2", minutes_ago=5)]  # a2 was just played -> excluded
+    result = dj._apply_album_awareness({"item_id": "wrong"})
+    assert [t["Id"] for t in result] == ["wrong"]
+
+
+def test_apply_album_awareness_injects_the_prelude_on_a_coin_flip_hit(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    intro = make_track("intro", "alb", 1, runtime_seconds=20)
+    main = make_track("main", "alb", 2, runtime_seconds=200)
+    dj.jf = FakeAlbumJellyfin({"intro": intro, "main": main})
+    dj.album_index = AlbumIndex(dj.jf)
+    monkeypatch.setattr("dj.dj.random.random", lambda: 0.0)
+    result = dj._apply_album_awareness({"item_id": "main"})
+    assert [t["Id"] for t in result] == ["intro", "main"]
+    assert result[0]["segue"] is False
+    assert result[1]["segue"] is True
+
+
+def test_apply_album_awareness_skips_the_prelude_on_a_coin_flip_miss(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    intro = make_track("intro", "alb", 1, runtime_seconds=20)
+    main = make_track("main", "alb", 2, runtime_seconds=200)
+    dj.jf = FakeAlbumJellyfin({"intro": intro, "main": main})
+    dj.album_index = AlbumIndex(dj.jf)
+    monkeypatch.setattr("dj.dj.random.random", lambda: 0.99)
+    result = dj._apply_album_awareness({"item_id": "main"})
+    assert [t["Id"] for t in result] == ["main"]
+
+
+def test_apply_album_awareness_falls_back_to_the_original_item_on_lookup_failure(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakeAlbumJellyfin({})
+    item = {"item_id": "missing", "title": "T", "author": "A"}
+    assert dj._apply_album_awareness(item) == [item]
