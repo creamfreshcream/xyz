@@ -165,25 +165,29 @@ class Jellyfin:
         return items[0] if items else None
 
     def tracks_by_artist(self, name: str, limit: int = 50) -> list[dict[str, Any]]:
-        # SearchTerm is fuzzy (title matches too), so only keep results whose
-        # Artists field is an exact case-insensitive match for `name` --
-        # avoids e.g. "Poppy" pulling in an unrelated track just titled Poppy.
+        # /Items?SearchTerm= doesn't reliably match on the Artists field (it
+        # missed real, well-stocked artists in practice) -- resolve the
+        # artist to an id via /Artists first, then filter by ArtistIds,
+        # which Jellyfin does properly.
+        artists = self.get("/Artists", {"searchTerm": name, "Recursive": "true", "Limit": 10})
+        needle = name.strip().lower()
+        match = next(
+            (a for a in artists.get("Items", []) if a.get("Name", "").strip().lower() == needle),
+            None,
+        )
+        if not match:
+            return []
         data = self.get(
             "/Items",
             {
-                "SearchTerm": name,
+                "ArtistIds": match["Id"],
                 "IncludeItemTypes": "Audio",
                 "Recursive": "true",
                 "Fields": "Artists",
                 "Limit": limit,
             },
         )
-        needle = name.strip().lower()
-        return [
-            item
-            for item in data.get("Items", [])
-            if any(needle == a.strip().lower() for a in (item.get("Artists") or []))
-        ]
+        return data.get("Items", [])
 
     def tracks_by_genre(self, genre: str, limit: int = 200) -> list[dict[str, Any]]:
         data = self.get(
