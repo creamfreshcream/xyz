@@ -236,7 +236,12 @@
   let mount = FALLBACK_MOUNT;
   let lastTrack = "";
 
-  const savedVolume = Number(localStorage.getItem("radio:volume"));
+  // A synchronous throw here (storage blocked entirely -- strict privacy
+  // settings, some private-browsing configurations) would otherwise kill
+  // this whole script before poll() ever gets called, leaving the page
+  // stuck on its static "Offline" markup with no request ever firing.
+  let savedVolume = NaN;
+  try { savedVolume = Number(localStorage.getItem("radio:volume")); } catch (_) {}
   const volume = Number.isFinite(savedVolume) && savedVolume > 0 ? savedVolume : 80;
   el("volume").value = volume;
   audio.volume = volume / 100;
