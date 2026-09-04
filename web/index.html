@@ -338,6 +338,7 @@
   async function poll() {
     try {
       const response = await fetch(STATUS_URL, { cache: "no-store" });
+      if (!response.ok) console.error("radio: status fetch returned", response.status);
       const source = pickSource(sources((await response.json()).icestats));
       if (!source) return setOffline();
 
@@ -363,7 +364,8 @@
       el("status").classList.remove("offline");
       el("status-text").textContent = "On air";
       remember([artist, title].filter(Boolean).join(" — "));
-    } catch (_) {
+    } catch (err) {
+      console.error("radio: poll() failed", err);
       setOffline();
     }
   }
