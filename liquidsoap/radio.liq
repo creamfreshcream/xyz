@@ -144,14 +144,22 @@ def smart_transition(a, b) =
   let segue_note = if segue then " [segue: album-consecutive, no crossfade]" else "" end
   log(label="smart_crossfade", level=3,
     "#{a_title} (#{a_level}dB) -> #{b_title} (#{b_level}dB)#{segue_note}")
+  # Both "no crossfade" cases below use a near-zero-duration fade rather than
+  # sequence() -- sequence() inside cross() was observed live to leave
+  # Icecast's title metadata stuck on the outgoing track for many tracks
+  # in a row (found via the segue case, which made this path common enough
+  # to notice; presumably always affected the quiet-track case too). A
+  # ~0-duration add()/fade pair is audibly a hard cut but stays on the same
+  # metadata-safe path the crossfade branches already use correctly.
   if segue then
-    sequence([a_source, b_source])
+    log(label="smart_crossfade", level=3, "  decision: hard cut (album-consecutive)")
+    add(normalize=false, [fade.out(duration=0.01, a_source), fade.in(duration=0.01, b_source)])
   elsif a_level >= crossfade_high_db and b_level >= crossfade_high_db then
     log(label="smart_crossfade", level=3, "  decision: crossfade (both loud)")
     add(normalize=false, [fade.out(duration=crossfade_duration, a_source), fade.in(duration=crossfade_duration, b_source)])
   elsif a_level < crossfade_low_db or b_level < crossfade_low_db then
-    log(label="smart_crossfade", level=3, "  decision: sequence (one side too quiet to blend)")
-    sequence([a_source, b_source])
+    log(label="smart_crossfade", level=3, "  decision: hard cut (one side too quiet to blend)")
+    add(normalize=false, [fade.out(duration=0.01, a_source), fade.in(duration=0.01, b_source)])
   elsif abs(a_level - b_level) <= crossfade_margin_db then
     log(label="smart_crossfade", level=3, "  decision: crossfade (similar levels)")
     add(normalize=false, [fade.out(duration=crossfade_duration, a_source), fade.in(duration=crossfade_duration, b_source)])
