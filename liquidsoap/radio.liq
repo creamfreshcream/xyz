@@ -58,6 +58,37 @@ radio_mounts =
     if env_bool("RADIO_HQ_ENABLED", false) then [env("RADIO_HQ_MOUNT", "/stream-hq.mp3")] else [] end
   )
 
+# Push a metadata update to Icecast's admin API directly with http.get,
+# rather than icy.update_metadata -- that helper has no timeout of its own
+# and was observed live to occasionally hang for ~70s before failing with
+# EPIPE, backing up thread.run's queue so every transition after the stuck
+# one never got its update sent at all (title stayed frozen on whichever
+# track's push preceded the hang). A short explicit timeout means a single
+# bad request can only ever cost a few seconds, never take the rest of the
+# session down with it.
+def push_icecast_metadata(mount, meta) =
+  title = list.assoc(default="", "title", meta)
+  artist = list.assoc(default="", "artist", meta)
+  song =
+    if artist != "" and title != "" then "#{artist} - #{title}"
+    elsif title != "" then title
+    else artist
+    end
+  if song != "" then
+    auth = string.base64.encode("source:#{icecast_password}")
+    url =
+      "http://#{icecast_host}:#{icecast_port}/admin/metadata?mount=#{url.encode(mount)}" ^
+      "&mode=updinfo&song=#{url.encode(song)}"
+    thread.run(fast=false, fun () ->
+      try
+        ignore(http.get(url, timeout=5., headers=[("Authorization", "Basic #{auth}")]))
+      catch err do
+        log(label="metadata_push", level=2, "Update failed for #{mount}: #{error.message(err)}")
+      end
+    )
+  end
+end
+
 # ------------------------------------------------------------- metadata cleanup
 
 # Some library tags carry literal HTML entities (e.g. "&#269;" instead of "č")
@@ -158,22 +189,9 @@ def smart_transition(a, b) =
   # fire for a track that only ever appears as the "b" side of a
   # dynamically-composed cross() transition source. Push the update
   # explicitly here instead, since this function demonstrably runs once per
-  # real transition (the log line above proves it).
-  #
-  # thread.run(fast=false, ...) is not optional: a first attempt called
-  # icy.update_metadata directly here, which blocked the main streaming
-  # thread on the HTTP round-trip long enough that Icecast's own read
-  # timeout fired and dropped the source connection entirely (confirmed
-  # live: "Disconnecting source due to socket timeout" ~17s after a
-  # successful update, killing the stream for all listeners).
-  list.iter(fun (mount) ->
-    thread.run(fast=false, fun () ->
-      icy.update_metadata(
-        host=icecast_host, port=icecast_port, password=icecast_password,
-        mount=mount, b_meta
-      )
-    )
-  , radio_mounts)
+  # real transition (the log line above proves it). See push_icecast_metadata
+  # for why this isn't a direct icy.update_metadata call.
+  list.iter(fun (mount) -> push_icecast_metadata(mount, b_meta), radio_mounts)
   # Both "no crossfade" cases below use a near-zero-duration fade rather than
   # sequence() -- sequence() inside cross() was observed live to leave
   # Icecast's title metadata stuck on the outgoing track for many tracks
