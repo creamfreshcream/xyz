@@ -16,6 +16,7 @@ from dj.dj import (
     mood_distance,
     parse_feature_string,
 )
+from datetime import timedelta, timezone
 
 SCHEDULE = [
     {"name": "morning", "hours": [6, 10], "mood": {"relaxed": 0.7}},
@@ -337,3 +338,75 @@ def test_pick_preferred_combines_artists_and_tags(tmp_path, monkeypatch):
     monkeypatch.setattr(dj.catalogue, "tag_pool", lambda tags, exclude, min_score=0.3: ["2"])
     ids = {dj._pick_preferred({"artists": ["A"], "tags": ["female vocalists"]}, exclude=set())["item_id"] for _ in range(20)}
     assert ids == {"1", "2"}
+
+
+class FakePlaylistJellyfin:
+    def __init__(self):
+        self.created = []
+        self.deleted = []
+        self._next_id = 1
+
+    def create_playlist(self, name, item_ids):
+        if not item_ids:
+            return None
+        new_id = f"pl{self._next_id}"
+        self._next_id += 1
+        self.created.append((name, list(item_ids), new_id))
+        return new_id
+
+    def delete_item(self, item_id):
+        self.deleted.append(item_id)
+
+
+def history_entry(item_id):
+    return {"item_id": item_id, "artist": "A", "title": "T", "at": datetime.now(timezone.utc).isoformat()}
+
+
+def test_sync_playlist_does_nothing_without_history(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePlaylistJellyfin()
+    dj._sync_playlist()
+    assert dj.jf.created == []
+    assert dj.state.synced_playlist_id is None
+
+
+def test_sync_playlist_creates_from_recent_history(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePlaylistJellyfin()
+    dj.state.history = [history_entry("1"), history_entry("2")]
+    dj._sync_playlist()
+    assert dj.jf.created == [(dj.cfg.playlist_name, ["1", "2"], "pl1")]
+    assert dj.state.synced_playlist_id == "pl1"
+    assert dj.state.last_playlist_sync is not None
+
+
+def test_sync_playlist_replaces_the_previous_one(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePlaylistJellyfin()
+    dj.state.history = [history_entry("1")]
+    dj._sync_playlist()
+    dj.state.last_playlist_sync = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    dj.state.history.append(history_entry("2"))
+    dj._sync_playlist()
+    assert dj.jf.created[-1] == (dj.cfg.playlist_name, ["1", "2"], "pl2")
+    assert dj.jf.deleted == ["pl1"]
+    assert dj.state.synced_playlist_id == "pl2"
+
+
+def test_sync_playlist_respects_the_sync_interval(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePlaylistJellyfin()
+    dj.state.history = [history_entry("1")]
+    dj._sync_playlist()
+    dj.state.history.append(history_entry("2"))
+    dj._sync_playlist()  # too soon -- default interval hasn't elapsed
+    assert len(dj.jf.created) == 1
+
+
+def test_sync_playlist_caps_track_count(tmp_path):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.jf = FakePlaylistJellyfin()
+    dj.cfg = Config(**{**dj.cfg.__dict__, "playlist_max_tracks": 2})
+    dj.state.history = [history_entry(str(i)) for i in range(5)]
+    dj._sync_playlist()
+    assert dj.jf.created[0][1] == ["3", "4"]

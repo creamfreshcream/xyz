@@ -126,6 +126,9 @@ Everything lives in `.env`.
 | `DJ_DWELL_TRACKS` | `6` | Tracks spent lingering near a target |
 | `DJ_RECENT_TRACK_HOURS` / `DJ_RECENT_ARTIST_MINUTES` | `3` / `45` | Repeat-avoidance windows |
 | `DJ_STATUS_PORT` | `9090` | The `dj` service's own status/override API |
+| `DJ_PLAYLIST_NAME` | `DJ: on air now` | Real Jellyfin playlist mirroring recent playback |
+| `DJ_PLAYLIST_SYNC_MINUTES` | `10` | How often that playlist is refreshed |
+| `DJ_PLAYLIST_MAX_TRACKS` | `30` | Most recent tracks it holds |
 | `RADIO_STREAM_MODE` | `direct` | `transcode` makes Jellyfin transcode first |
 | `RADIO_MAX_BITRATE` | `320000` | Only used when transcoding |
 | `RADIO_NAME` / `RADIO_DESCRIPTION` / `RADIO_GENRE` / `RADIO_URL` | — | Shown in players and directories |
@@ -180,6 +183,12 @@ curl -u creamfresh:<password> -X POST https://<your-domain>/dj/target \
   -d '{"query": "ultradespair"}'
 # or by Jellyfin item ID: -d '{"item_id": "8e0567b799acbea96fb855c90a81cea8"}'
 ```
+
+Recent playback also gets mirrored into a real Jellyfin playlist (`DJ_PLAYLIST_NAME`,
+default "DJ: on air now") every `DJ_PLAYLIST_SYNC_MINUTES` -- there's no update-in-place
+for a playlist's tracks without a user auth token (only an api_key here), so each sync
+deletes the previous one and creates a fresh one under the same name rather than piling
+up: always exactly one, holding the last `DJ_PLAYLIST_MAX_TRACKS` tracks.
 
 ## Operating it
 

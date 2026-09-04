@@ -101,6 +101,10 @@ class Config:
     recent_track_window_hours: float
     recent_artist_window_minutes: float
 
+    playlist_name: str
+    playlist_sync_minutes: float
+    playlist_max_tracks: int
+
     @classmethod
     def from_env(cls) -> "Config":
         jellyfin_url = _env("JELLYFIN_URL").rstrip("/")
@@ -134,6 +138,9 @@ class Config:
             dwell_tracks=_env_int("DJ_DWELL_TRACKS", 6),
             recent_track_window_hours=_env_float("DJ_RECENT_TRACK_HOURS", 3.0),
             recent_artist_window_minutes=_env_float("DJ_RECENT_ARTIST_MINUTES", 45.0),
+            playlist_name=_env("DJ_PLAYLIST_NAME", "DJ: on air now"),
+            playlist_sync_minutes=_env_float("DJ_PLAYLIST_SYNC_MINUTES", 10.0),
+            playlist_max_tracks=_env_int("DJ_PLAYLIST_MAX_TRACKS", 30),
         )
 
 
@@ -155,6 +162,39 @@ class Jellyfin:
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def post(self, path: str, body: dict[str, Any], timeout: float = 30.0) -> Any:
+        query = urllib.parse.urlencode({"api_key": self.cfg.api_key})
+        url = f"{self.cfg.jellyfin_url}{path}?{query}"
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
+            },
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+            return json.loads(raw.decode("utf-8")) if raw else None
+
+    def delete_item(self, item_id: str, timeout: float = 30.0) -> None:
+        query = urllib.parse.urlencode({"api_key": self.cfg.api_key})
+        url = f"{self.cfg.jellyfin_url}/Items/{item_id}?{query}"
+        request = urllib.request.Request(url, method="DELETE", headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(request, timeout=timeout):
+            pass
+
+    def create_playlist(self, name: str, item_ids: list[str]) -> str | None:
+        if not item_ids:
+            return None
+        body = {"Name": name, "Ids": item_ids, "MediaType": "Audio"}
+        if self.cfg.user_id:
+            body["UserId"] = self.cfg.user_id
+        result = self.post("/Playlists", body)
+        return result.get("Id") if result else None
 
     def search_track(self, query: str) -> dict[str, Any] | None:
         data = self.get(
@@ -413,6 +453,8 @@ class DjState:
     plan: list[dict[str, Any]] = field(default_factory=list)
     history: list[dict[str, Any]] = field(default_factory=list)
     manual_target: dict[str, Any] | None = None
+    synced_playlist_id: str | None = None
+    last_playlist_sync: str | None = None
 
     @classmethod
     def load(cls, path: str) -> "DjState":
@@ -764,7 +806,42 @@ class Dj:
                 item.get("author"), item.get("title"), current_len, len(self.state.plan),
             )
 
+        self._sync_playlist()
         self.state.save(self.cfg.state_file)
+
+    def _sync_playlist(self) -> None:
+        """Mirror recent playback into a real Jellyfin playlist so it shows
+        up as a normal, browsable thing rather than only living in this
+        service's own /status. Runs on a coarser cadence than the queue
+        top-up (DJ_PLAYLIST_SYNC_MINUTES) -- there's no update-in-place for a
+        playlist's item list without a user auth token (only api_key here),
+        so each sync deletes the previous one and creates a fresh one under
+        the same fixed name, keeping exactly one live rather than piling up."""
+        last = self.state.last_playlist_sync
+        if last:
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() / 60
+            if elapsed < self.cfg.playlist_sync_minutes:
+                return
+
+        item_ids = [h["item_id"] for h in self.state.history if h.get("item_id")]
+        item_ids = item_ids[-self.cfg.playlist_max_tracks :]
+        if not item_ids:
+            return
+
+        old_id = self.state.synced_playlist_id
+        new_id = self.jf.create_playlist(self.cfg.playlist_name, item_ids)
+        if not new_id:
+            log.warning("Playlist sync: failed to create %r", self.cfg.playlist_name)
+            return
+        if old_id and old_id != new_id:
+            try:
+                self.jf.delete_item(old_id)
+            except (urllib.error.URLError, OSError) as exc:
+                log.warning("Playlist sync: could not remove previous playlist %s (%s)", old_id, exc)
+
+        self.state.synced_playlist_id = new_id
+        self.state.last_playlist_sync = datetime.now(timezone.utc).isoformat()
+        log.info("Playlist sync: %r updated with %d tracks", self.cfg.playlist_name, len(item_ids))
 
     def run(self) -> None:
         serve_status(self, self.cfg.status_port)
