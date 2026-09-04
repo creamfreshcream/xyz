@@ -209,6 +209,10 @@
 
   .songmap-bg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
+  .songmap-trail { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .songmap-trail line { stroke: var(--accent); stroke-width: 3; stroke-linecap: round; }
+  .songmap-trail circle { fill: var(--accent); }
+
   .songmap-dot {
     position: absolute;
     width: 9px;
@@ -248,7 +252,7 @@
       <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
         <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z"/>
       </svg>
-      <input type="range" id="volume" min="0" max="100" value="80" aria-label="Volume">
+      <input type="range" id="volume" min="0" max="100" value="40" aria-label="Volume">
     </div>
     <div class="vote">
       <button class="vote-btn" id="vote-up" type="button" aria-label="Like this track" title="Gefällt mir" disabled>
@@ -279,6 +283,7 @@
     <div class="label">On the sonic map</div>
     <div class="songmap-frame">
       <img src="/song_map.png" alt="" class="songmap-bg">
+      <svg class="songmap-trail" id="songmap-trail" viewBox="0 0 900 680"></svg>
       <div class="songmap-dot" id="songmap-dot"></div>
     </div>
   </div>
@@ -324,7 +329,7 @@
   // stuck on its static "Offline" markup with no request ever firing.
   let savedVolume = NaN;
   try { savedVolume = Number(localStorage.getItem("radio:volume")); } catch (_) {}
-  const volume = Number.isFinite(savedVolume) && savedVolume > 0 ? savedVolume : 80;
+  const volume = Number.isFinite(savedVolume) && savedVolume > 0 ? savedVolume : 40;
   el("volume").value = volume;
   audio.volume = volume / 100;
 
@@ -501,16 +506,40 @@
       likesEl.textContent = `♥ ${likes} today`;
 
       const songmap = el("songmap");
+      const trailSvg = el("songmap-trail");
       const pos = status.map_position;
       if (pos && pos.bounds) {
-        const { x, y, bounds } = pos;
-        const px = ((x - bounds.xmin) / (bounds.xmax - bounds.xmin)) * 100;
-        const py = (1 - (y - bounds.ymin) / (bounds.ymax - bounds.ymin)) * 100;
-        el("songmap-dot").style.left = `${px}%`;
-        el("songmap-dot").style.top = `${py}%`;
+        const { bounds } = pos;
+        const toPct = (x, y) => ({
+          px: ((x - bounds.xmin) / (bounds.xmax - bounds.xmin)) * 100,
+          py: (1 - (y - bounds.ymin) / (bounds.ymax - bounds.ymin)) * 100,
+        });
+        const here = toPct(pos.x, pos.y);
+        el("songmap-dot").style.left = `${here.px}%`;
+        el("songmap-dot").style.top = `${here.py}%`;
         songmap.hidden = false;
+
+        // Fading trail of recently played tracks, oldest to newest, ending
+        // at the current position -- older points/segments are more faded.
+        const trail = (status.map_trail || []).map((p) => toPct(p.x, p.y));
+        const n = trail.length;
+        const frac = (i) => (n > 1 ? i / (n - 1) : 1);
+        let svg = "";
+        for (let i = 0; i < n - 1; i++) {
+          const a = trail[i], b = trail[i + 1];
+          const opacity = 0.08 + 0.55 * frac(i + 1);
+          svg += `<line x1="${(a.px * 9).toFixed(1)}" y1="${(a.py * 6.8).toFixed(1)}" x2="${(b.px * 9).toFixed(1)}" y2="${(b.py * 6.8).toFixed(1)}" stroke-opacity="${opacity.toFixed(2)}" />`;
+        }
+        for (let i = 0; i < n - 1; i++) {
+          const p = trail[i];
+          const opacity = 0.12 + 0.5 * frac(i);
+          const r = 2.4 + 1.6 * frac(i);
+          svg += `<circle cx="${(p.px * 9).toFixed(1)}" cy="${(p.py * 6.8).toFixed(1)}" r="${r.toFixed(1)}" opacity="${opacity.toFixed(2)}" />`;
+        }
+        trailSvg.innerHTML = svg;
       } else {
         songmap.hidden = true;
+        trailSvg.innerHTML = "";
       }
 
       const target = status && status.target;

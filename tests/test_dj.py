@@ -568,3 +568,40 @@ def test_song_map_position_returns_none_for_an_unmapped_track(monkeypatch):
         fp_rows=[("fp1", "jf-a")],
     )
     assert sm.position("nope") is None
+
+
+def _history_entry(item_id, minutes_ago):
+    at = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    return {"item_id": item_id, "artist": "A", "title": item_id, "at": at.isoformat()}
+
+
+def test_map_trail_orders_oldest_to_newest_and_skips_unmapped_tracks(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    dj.song_map = make_song_map(
+        monkeypatch,
+        points=[(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)],
+        fp_ids=["fp1", "fp2", "fp3"],
+        fp_rows=[("fp1", "jf-a"), ("fp2", "jf-b"), ("fp3", "jf-c")],
+    )
+    dj.state.history = [
+        _history_entry("jf-a", minutes_ago=30),
+        _history_entry("unmapped", minutes_ago=20),
+        _history_entry("jf-b", minutes_ago=10),
+        _history_entry("jf-c", minutes_ago=0),
+    ]
+    trail = dj._map_trail()
+    assert trail == [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 1.0}, {"x": 2.0, "y": 2.0}]
+
+
+def test_map_trail_is_capped_to_the_configured_length(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{"name": "x", "hours": [0, 24], "mood": {}}])
+    n = dj.MAP_TRAIL_LENGTH + 3
+    points = [(float(i), float(i)) for i in range(n)]
+    fp_ids = [f"fp{i}" for i in range(n)]
+    fp_rows = [(f"fp{i}", f"jf-{i}") for i in range(n)]
+    dj.song_map = make_song_map(monkeypatch, points=points, fp_ids=fp_ids, fp_rows=fp_rows)
+    dj.state.history = [_history_entry(f"jf-{i}", minutes_ago=n - i) for i in range(n)]
+    trail = dj._map_trail()
+    assert len(trail) == dj.MAP_TRAIL_LENGTH
+    assert trail[-1] == {"x": float(n - 1), "y": float(n - 1)}
+    assert trail[0] == {"x": float(n - dj.MAP_TRAIL_LENGTH), "y": float(n - dj.MAP_TRAIL_LENGTH)}

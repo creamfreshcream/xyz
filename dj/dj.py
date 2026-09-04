@@ -805,6 +805,8 @@ def serve_status(dj: "Dj", port: int) -> None:
 # ------------------------------------------------------------------------- Dj
 
 class Dj:
+    MAP_TRAIL_LENGTH = 8  # how many recent tracks to draw as a fading path on the song map
+
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.jf = Jellyfin(cfg)
@@ -828,7 +830,23 @@ class Dj:
                 "queued_ahead": len(self.state.plan),
                 "likes_today": self.state.likes_today(),
                 "map_position": self.song_map.position(self.state.last_item_id) if self.state.last_item_id else None,
+                "map_trail": self._map_trail(),
             }
+
+    def _map_trail(self) -> list[dict[str, float]]:
+        """Positions of the last MAP_TRAIL_LENGTH played tracks, oldest first,
+        ending at the current track -- lets the web player draw a fading path
+        showing how the DJ wandered across the sonic map to get here."""
+        recent = self.state.history[-self.MAP_TRAIL_LENGTH :]
+        trail = []
+        for h in recent:
+            item_id = h.get("item_id")
+            if not item_id:
+                continue
+            pos = self.song_map.position(item_id)
+            if pos:
+                trail.append({"x": pos["x"], "y": pos["y"]})
+        return trail
 
     def set_manual_target(self, body: dict[str, Any]) -> dict[str, Any]:
         if "item_id" in body:
