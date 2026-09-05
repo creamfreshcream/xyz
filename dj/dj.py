@@ -911,10 +911,26 @@ def queue_push(cfg: Config, uri: str) -> None:
 
 # --------------------------------------------------------------- bridging logic
 
-def build_bridge(jf: Jellyfin, from_id: str | None, to_id: str, max_tracks: int) -> list[dict[str, Any]]:
+def build_bridge(
+    jf: Jellyfin,
+    from_id: str | None,
+    to_id: str,
+    max_tracks: int,
+    exclude_artists: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """A sonic path from the last queued track to the new target. Falls back
     to just the target itself if there's no known "from" yet (first run) or
-    the path lookup fails."""
+    the path lookup fails.
+
+    exclude_artists is a hard artist-name filter (already lowercased). It's
+    only applied to intermediate hops, after subsampling: find_path's raw
+    path (up to max_steps=300 hops) carries no artist info at all, so
+    checking it pre-subsample would mean resolving hundreds of Jellyfin
+    items per bridge for nothing -- checking only the handful of hops that
+    actually get pushed is cheap. Found live: a daypart's exclude_artists
+    only ever filtered Dj._pick_preferred's target/dwell picks, never
+    build_bridge's, so an excluded artist could still show up as a
+    sonic-path connector between two other tracks."""
     if not from_id or from_id == to_id:
         return []
     try:
@@ -935,6 +951,21 @@ def build_bridge(jf: Jellyfin, from_id: str | None, to_id: str, max_tracks: int)
         sampled = [path[int(i * step)] for i in range(max_tracks - 1)]
         sampled.append(path[-1])
         path = sampled
+    if exclude_artists:
+        filtered = []
+        last_index = len(path) - 1
+        for i, hop in enumerate(path):
+            # The last hop is the target itself -- _next_target already
+            # guarantees it isn't an excluded artist, so it's always kept
+            # rather than re-resolved.
+            if i == last_index:
+                filtered.append(hop)
+                continue
+            item = jf.item(hop.get("item_id") or hop.get("Id"))
+            artists = {a.strip().lower() for a in (item.get("Artists") or [])} if item else set()
+            if not artists & exclude_artists:
+                filtered.append(hop)
+        path = filtered
     return path
 
 
@@ -1308,7 +1339,8 @@ class Dj:
 
         is_themed = bool(daypart and (daypart.get("artists") or daypart.get("genres") or daypart.get("tags")))
         bridge_max = self.cfg.themed_bridge_max_tracks if is_themed else self.cfg.bridge_max_tracks
-        bridge = build_bridge(self.jf, self.state.last_item_id, target["item_id"], bridge_max)
+        exclude_artists = {a.strip().lower() for a in (daypart.get("exclude_artists") or [])} if daypart else set()
+        bridge = build_bridge(self.jf, self.state.last_item_id, target["item_id"], bridge_max, exclude_artists)
         if not bridge:
             bridge = [target]
         exclude = (

@@ -103,18 +103,18 @@
       "min": {"danceable": 0.35}
     },
     {
-      "_comment": "Mirrors techno_party_thursday's own window exactly (see dayparts above) -- higher than the daytime floor, on top of the daypart's own mood target already aiming for danceable 0.9.",
+      "_comment": "Mirrors techno_party_thursday's own window exactly (see dayparts above) -- higher than the daytime floor, on top of the daypart's own mood target already aiming for danceable 0.9. 0.6, not 0.75: checked live against the library's own 137 Techno-genre tracks and none of them clear 0.75 (max is 0.70), so that floor silently no-op'd via the soft-fallback-when-empty behaviour on every single pick. 0.6 actually covers a meaningful slice (49/137) instead.",
       "name": "techno_night_thursday_danceable_floor",
       "days": [3],
       "hours": [20, 22],
-      "min": {"danceable": 0.75}
+      "min": {"danceable": 0.6}
     },
     {
       "_comment": "Mirrors techno_party_weekend's own window exactly.",
       "name": "techno_night_weekend_danceable_floor",
       "days": [4, 5],
       "hours": [20, 2],
-      "min": {"danceable": 0.75}
+      "min": {"danceable": 0.6}
     }
   ]
 }

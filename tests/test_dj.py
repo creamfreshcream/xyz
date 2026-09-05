@@ -162,11 +162,15 @@ def test_annotate_uri_omits_liq_cross_duration_without_an_override():
 
 
 class FakePathJellyfin:
-    def __init__(self, path):
+    def __init__(self, path, items=None):
         self._path = path
+        self._items = items or {}
 
     def find_path(self, start_id, end_id, max_steps=300):
         return self._path
+
+    def item(self, item_id):
+        return self._items.get(item_id)
 
 
 def test_build_bridge_drops_the_starting_track():
@@ -188,6 +192,30 @@ def test_build_bridge_subsamples_long_paths_but_keeps_the_target():
     jf = FakePathJellyfin(path)
     bridge = build_bridge(jf, "from", "to", max_tracks=10)
     assert len(bridge) <= 11
+    assert bridge[-1]["item_id"] == "to"
+
+
+def test_build_bridge_filters_out_excluded_artist_hops():
+    path = [
+        {"item_id": "from"},
+        {"item_id": "bad"},
+        {"item_id": "good"},
+        {"item_id": "to"},
+    ]
+    items = {"bad": {"Artists": ["Laibach"]}, "good": {"Artists": ["Some Artist"]}}
+    jf = FakePathJellyfin(path, items=items)
+    bridge = build_bridge(jf, "from", "to", max_tracks=10, exclude_artists={"laibach"})
+    assert [t["item_id"] for t in bridge] == ["good", "to"]
+
+
+def test_build_bridge_never_re_checks_the_target_hop_itself():
+    # _next_target already guarantees the target isn't an excluded artist,
+    # so build_bridge doesn't bother re-resolving/re-checking the last hop
+    # even if it happens to match -- this documents that division of
+    # responsibility rather than relying on it as a safety net.
+    path = [{"item_id": "from"}, {"item_id": "to"}]
+    jf = FakePathJellyfin(path, items={})
+    bridge = build_bridge(jf, "from", "to", max_tracks=10, exclude_artists={"whoever"})
     assert bridge[-1]["item_id"] == "to"
 
 
@@ -660,7 +688,7 @@ def test_refill_plan_uses_the_themed_pool_for_dwell_on_a_themed_daypart(tmp_path
         dj.catalogue, "tag_pool",
         lambda tags, exclude, min_score=0.3: [i for i in ["1", "2"] if i not in exclude],
     )
-    monkeypatch.setattr("dj.dj.build_bridge", lambda jf, from_id, to_id, max_tracks: [])
+    monkeypatch.setattr("dj.dj.build_bridge", lambda jf, from_id, to_id, max_tracks, exclude_artists=None: [])
     dj._refill_plan()
     # Which of "1"/"2" ends up the target vs. the dwell candidate is a
     # random.choice pick inside _pick_preferred -- assert on the roles, not
@@ -677,7 +705,7 @@ def test_refill_plan_uses_the_themed_bridge_cap_for_themed_dayparts(tmp_path, mo
     monkeypatch.setattr(dj.catalogue, "tag_pool", lambda tags, exclude, min_score=0.3: ["1"])
     captured = {}
 
-    def fake_build_bridge(jf, from_id, to_id, max_tracks):
+    def fake_build_bridge(jf, from_id, to_id, max_tracks, exclude_artists=None):
         captured["max_tracks"] = max_tracks
         return []
 
@@ -693,7 +721,7 @@ def test_refill_plan_uses_the_full_bridge_cap_for_non_themed_dayparts(tmp_path, 
     monkeypatch.setattr(dj.catalogue, "refresh", lambda: None)
     captured = {}
 
-    def fake_build_bridge(jf, from_id, to_id, max_tracks):
+    def fake_build_bridge(jf, from_id, to_id, max_tracks, exclude_artists=None):
         captured["max_tracks"] = max_tracks
         return []
 
@@ -701,6 +729,23 @@ def test_refill_plan_uses_the_full_bridge_cap_for_non_themed_dayparts(tmp_path, 
     monkeypatch.setattr("dj.dj.build_dwell", lambda *a, **k: [])
     dj._refill_plan()
     assert captured["max_tracks"] == dj.cfg.bridge_max_tracks
+
+
+def test_refill_plan_passes_exclude_artists_through_to_build_bridge(tmp_path, monkeypatch):
+    dj = make_dj(tmp_path, [{
+        "name": "x", "hours": [0, 24], "tags": ["techno"], "mood": {}, "exclude_artists": ["Laibach"],
+    }])
+    dj.jf = FakePreferenceJellyfin(by_ids={"1": {"Id": "1", "Name": "Target", "Artists": []}})
+    monkeypatch.setattr(dj.catalogue, "tag_pool", lambda tags, exclude, min_score=0.3: ["1"])
+    captured = {}
+
+    def fake_build_bridge(jf, from_id, to_id, max_tracks, exclude_artists=None):
+        captured["exclude_artists"] = exclude_artists
+        return []
+
+    monkeypatch.setattr("dj.dj.build_bridge", fake_build_bridge)
+    dj._refill_plan()
+    assert captured["exclude_artists"] == {"laibach"}
 
 
 def test_refill_plan_tags_every_plan_item_with_crossfade_override(tmp_path, monkeypatch):
@@ -715,7 +760,7 @@ def test_refill_plan_tags_every_plan_item_with_crossfade_override(tmp_path, monk
         dj.catalogue, "tag_pool",
         lambda tags, exclude, min_score=0.3: [i for i in ["1", "2"] if i not in exclude],
     )
-    monkeypatch.setattr("dj.dj.build_bridge", lambda jf, from_id, to_id, max_tracks: [])
+    monkeypatch.setattr("dj.dj.build_bridge", lambda jf, from_id, to_id, max_tracks, exclude_artists=None: [])
     dj._refill_plan()
     assert len(dj.state.plan) == 2
     assert all(item["crossfade_override"] == 20 for item in dj.state.plan)
@@ -726,7 +771,7 @@ def test_refill_plan_does_not_tag_plan_items_without_crossfade_seconds(tmp_path,
     dj.jf = FakeItemJellyfin()
     dj.catalogue._tracks = [{"item_id": "1", "mood": {"happy": 1.0}}]
     monkeypatch.setattr(dj.catalogue, "refresh", lambda: None)
-    monkeypatch.setattr("dj.dj.build_bridge", lambda jf, from_id, to_id, max_tracks: [])
+    monkeypatch.setattr("dj.dj.build_bridge", lambda jf, from_id, to_id, max_tracks, exclude_artists=None: [])
     monkeypatch.setattr("dj.dj.build_dwell", lambda *a, **k: [])
     dj._refill_plan()
     assert "crossfade_override" not in dj.state.plan[0]
